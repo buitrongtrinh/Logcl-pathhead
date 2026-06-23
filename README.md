@@ -200,10 +200,15 @@ Only `--train-history-len` differs between datasets; everything else is shared
 | Dataset | `--train-history-len` | Notes |
 |---|:---:|---|
 | ICEWS14 | 7 | smallest, fast |
-| ICEWS18 | 9 | large (23K entities) — Level 2 may OOM, lower `--path-batch-size` to `8`/`4` |
+| ICEWS18 | 9 | largest (23K entities) — heaviest for Level 2 |
 | ICEWS05-15 | 15 | very long (4017 timestamps) — slow preprocessing & training |
 
 > The ICEWS18 / ICEWS05-15 history lengths are reasonable defaults; tune them per the paper if needed.
+
+> **`--path-batch-size 64`** is tuned for a **16 GB GPU** (e.g. RTX A4000): it only
+> chunks the Path Head computation for memory — it does **not** change results, only
+> speed/VRAM. Larger = faster until the GPU saturates. Lower it (`32`/`16`/`8`) if you
+> hit `CUDA out of memory`; raise it (`128`) only on ≥24 GB GPUs.
 
 Each run writes a checkpoint to `./models/`, appends a metrics row to
 `./result/<dataset>.csv`, and a rank CSV to `ranks/`. Report the mean ± std of the
@@ -247,7 +252,7 @@ COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
 
 for SEED in 123 42 2023; do
   python src/main.py -d ICEWS14 $COMMON \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 16 --path-level 2 \
+    --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
     --seed $SEED \
     --dump-ranks ranks/ranks_m2_ICEWS14_seed${SEED}.csv
 done
@@ -255,7 +260,7 @@ done
 
 ### 2. ICEWS18
 
-Larger graph → Level 2 may run out of GPU memory; drop `--path-batch-size` to `8` or `4`.
+Largest graph (23K entities) → heaviest for Level 2. `--path-batch-size 64` fits a 16 GB GPU (~14 GB VRAM); drop to `32`/`16` if it OOMs.
 
 **Preprocess (run once):**
 ```bash
@@ -280,7 +285,7 @@ for SEED in 123 42 2023; do
 done
 ```
 
-**Train — Level 2 (3 seeds):** lower `--path-batch-size` to `4` if it still OOMs.
+**Train — Level 2 (3 seeds):** heaviest config; if `CUDA out of memory`, lower `--path-batch-size` to `32`/`16`.
 ```bash
 COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
   --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
@@ -290,7 +295,7 @@ COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
 
 for SEED in 123 42 2023; do
   python src/main.py -d ICEWS18 $COMMON \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 8 --path-level 2 \
+    --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
     --seed $SEED \
     --dump-ranks ranks/ranks_m2_ICEWS18_seed${SEED}.csv
 done
@@ -333,7 +338,7 @@ COMMON="--train-history-len 15 --test-history-len 15 --dilate-len 1 --lr 0.001 \
 
 for SEED in 123 42 2023; do
   python src/main.py -d ICEWS05-15 $COMMON \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 8 --path-level 2 \
+    --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
     --seed $SEED \
     --dump-ranks ranks/ranks_m2_ICEWS05-15_seed${SEED}.csv
 done
@@ -352,7 +357,7 @@ python src/main.py -d ICEWS14 --test \
   --decoder convtranse --encoder uvrgcn --layer-norm \
   --pre-weight 0.9 --pre-type all --add-static-graph --use-cl \
   --train-history-len 7 --test-history-len 7 --temperature 0.03 \
-  --use-path --path-dim 32 --path-layers 2 --path-batch-size 16 --path-level 2 \
+  --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
   --seed 123 --dump-ranks ranks/ranks_m2_ICEWS14_test.csv
 ```
 
