@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 
 # from rgcn.layers import RGCNBlockLayer as RGCNLayer
@@ -123,7 +124,8 @@ class RecurrentRGCN(nn.Module):
                  num_hidden_layers=1, dropout=0, self_loop=False, skip_connect=False, layer_norm=False, input_dropout=0, 
                  hidden_dropout=0, feat_dropout=0, aggregation='cat', weight=1,pre_weight=0.7, discount=0, angle=0, use_static=False, pre_type = 'short', 
                  use_cl= False, temperature=0.007, entity_prediction=False, relation_prediction=False, use_cuda=False,
-                 gpu = 0, analysis=False):
+                 gpu = 0, analysis=False, use_path=False, path_dim=32, path_layers=2,
+                 path_batch_size=128, path_level=2):
         super(RecurrentRGCN, self).__init__()
 
         self.decoder_name = decoder_name
@@ -150,6 +152,7 @@ class RecurrentRGCN(nn.Module):
         self.angle = angle
         self.relation_prediction = relation_prediction
         self.entity_prediction = entity_prediction
+        self.use_path = use_path
         self.emb_rel = None
         self.gpu = gpu
 
@@ -176,6 +179,29 @@ class RecurrentRGCN(nn.Module):
 
         self.emb_rel = torch.nn.Parameter(torch.Tensor(self.num_rels * 2, self.h_dim), requires_grad=True).float()
         torch.nn.init.xavier_normal_(self.emb_rel)
+
+        # ---------------- Path head: optional parameters ----------------
+        self.path_level = path_level
+        if self.use_path:
+            if path_dim <= 0 or path_layers <= 0 or path_batch_size <= 0:
+                raise ValueError("Path head dimensions, layers, and batch size must be positive")
+            if path_level not in (1, 2):
+                raise ValueError("path_level must be 1 (shallow) or 2 (deep fusion)")
+            self.path_dim = path_dim
+            self.path_L = path_layers
+            self.path_batch_size = path_batch_size
+            self.path_rel = nn.Linear(self.h_dim, self.path_dim)
+            self.path_boundary = nn.Linear(self.h_dim, self.path_dim)
+            self.path_upd = nn.ModuleList([
+                nn.Linear(self.path_dim * 2, self.path_dim)
+                for _ in range(self.path_L)
+            ])
+            self.path_out = nn.Linear(self.path_dim, 1)
+            self.path_gamma = nn.Parameter(torch.zeros(1))
+            # Muc 2 (hop nhat sau): cham diem path bang query [h_s ; hr_r] cua LogCL.
+            if self.path_level >= 2:
+                self.path_q = nn.Linear(self.h_dim * 2, self.path_dim)
+            print("[path] head ON | dim=%d L=%d level=%d" % (self.path_dim, self.path_L, self.path_level))
 
         self.dynamic_emb = torch.nn.Parameter(torch.Tensor(num_ents, h_dim), requires_grad=True).float()
         torch.nn.init.normal_(self.dynamic_emb)
@@ -246,6 +272,115 @@ class RecurrentRGCN(nn.Module):
             self.rdecoder = ConvTransR(num_rels, h_dim, input_dropout, hidden_dropout, feat_dropout)
         else:
             raise NotImplementedError 
+
+    # ---------------- Path head: message passing and scoring ----------------
+    def _merge_path_edges(self, history_graphs, device):
+        edge_parts = []
+        for graph in history_graphs:
+            src, dst = graph.edges()
+            edge_parts.append((
+                src.to(device=device, dtype=torch.long),
+                dst.to(device=device, dtype=torch.long),
+                graph.edata['type'].to(device=device, dtype=torch.long),
+            ))
+
+        if not edge_parts:
+            empty = torch.empty(0, dtype=torch.long, device=device)
+            return empty, empty, empty
+
+        return (
+            torch.cat([part[0] for part in edge_parts]),
+            torch.cat([part[1] for part in edge_parts]),
+            torch.cat([part[2] for part in edge_parts]),
+        )
+
+    def path_head_scores(self, queries, history_graphs, relation_embedding=None,
+                         merged_edges=None, ent_emb=None):
+        """Return two-hop path scores for every candidate entity.
+
+        Muc 2 (hop nhat sau): truyen relation_embedding = quan he DA tien hoa (hr)
+        va ent_emb = thuc the DA tien hoa (h); diem = path_q([h_s ; hr_r]) . H.
+        Muc 1: relation_embedding = emb_rel tinh, ent_emb=None, diem = path_out(H).
+        """
+        relation_embedding = self.emb_rel if relation_embedding is None else relation_embedding
+        device = relation_embedding.device
+        queries = queries.to(device=device, dtype=torch.long)
+        batch_size = queries.size(0)
+
+        if merged_edges is None:
+            merged_edges = self._merge_path_edges(history_graphs, device)
+        src, dst, rel = merged_edges
+
+        relation = F.normalize(relation_embedding, p=2, dim=1)
+        edge_relation = self.path_rel(relation[rel])
+        boundary = self.path_boundary(relation[queries[:, 1]])
+
+        hidden = relation.new_zeros(batch_size, self.num_ents, self.path_dim)
+        batch_index = torch.arange(batch_size, device=device)
+        source = queries[:, 0]
+        hidden[batch_index, source] = boundary
+
+        in_degree = torch.bincount(dst, minlength=self.num_ents).clamp_min(1)
+        in_degree = in_degree.to(dtype=hidden.dtype).view(1, self.num_ents, 1)
+        source_index = batch_index * self.num_ents + source
+
+        for update in self.path_upd:
+            message = hidden[:, src, :] * edge_relation.unsqueeze(0)
+            aggregate = torch.zeros_like(hidden)
+            aggregate.index_add_(1, dst, message)
+            aggregate = aggregate / in_degree
+
+            aggregate_weight = update.weight[:, :self.path_dim]
+            hidden_weight = update.weight[:, self.path_dim:]
+            hidden = F.linear(aggregate, aggregate_weight, update.bias) + \
+                     F.linear(hidden, hidden_weight)
+            hidden = F.relu(hidden)
+            hidden = torch.index_add(
+                hidden.view(-1, self.path_dim), 0, source_index, boundary
+            ).view(batch_size, self.num_ents, self.path_dim)
+
+        # Muc 2: cham diem theo query [h_s ; hr_r] (thay path_out rieng cua Muc 1)
+        if self.path_level >= 2 and ent_emb is not None:
+            q_path = self.path_q(torch.cat([ent_emb[source], relation[queries[:, 1]]], dim=-1))
+            return torch.einsum('bp,bnp->bn', q_path, hidden)
+        return self.path_out(hidden).squeeze(-1)
+
+    # ---------------- Path head: fusion with LogCL logits ----------------
+    def _fuse_path(self, logcl_score, queries, history_graphs, ent_emb=None, rel_emb=None):
+        if not self.use_path or not history_graphs:
+            return logcl_score
+
+        merged_edges = self._merge_path_edges(history_graphs, self.emb_rel.device)
+        if merged_edges[0].numel() == 0:
+            return logcl_score
+
+        # Muc 2: path doc quan he/thuc the DA tien hoa; Muc 1: emb_rel tinh, khong ent_emb.
+        if self.path_level >= 2:
+            relation_embedding = rel_emb if rel_emb is not None else self.emb_rel
+            entity_embedding = ent_emb
+        else:
+            relation_embedding = self.emb_rel
+            entity_embedding = None
+
+        def score_chunk(chunk_queries, relation_embedding_):
+            return self.path_head_scores(
+                chunk_queries, history_graphs, relation_embedding_, merged_edges,
+                entity_embedding,
+            )
+
+        path_chunks = []
+        for query_chunk in queries.split(self.path_batch_size, dim=0):
+            if self.training and torch.is_grad_enabled():
+                chunk_score = checkpoint(score_chunk, query_chunk, relation_embedding, use_reentrant=False)
+            else:
+                chunk_score = score_chunk(query_chunk, relation_embedding)
+            path_chunks.append(chunk_score)
+
+        path_score = torch.cat(path_chunks, dim=0)
+        mean = path_score.mean(dim=1, keepdim=True)
+        std = path_score.std(dim=1, keepdim=True, unbiased=False) + 1e-6
+        path_score = (path_score - mean) / std
+        return logcl_score + self.path_gamma * path_score
 
     def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph, use_cuda):
 
@@ -345,6 +480,8 @@ class RecurrentRGCN(nn.Module):
             if self.pre_type == "all":
 
                 scores_ob,_= self.decoder_ob.forward( embedding,r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
+                # Path head fusion must happen before softmax.
+                scores_ob = self._fuse_path(scores_ob, all_triples, test_graph, embedding, r_emb)
                 score_seq = F.softmax(scores_ob, dim=1)
                 score_en =score_seq
             scores_en = torch.log(score_en)
@@ -394,6 +531,8 @@ class RecurrentRGCN(nn.Module):
 
         if self.pre_type == "all":
             scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples, his_emb,self.pre_weight, self.pre_type)
+            # Path head fusion must happen before softmax.
+            scores_ob = self._fuse_path(scores_ob, all_triples, glist, embedding, r_emb)
             score_seq = F.softmax(scores_ob, dim=1)
             score_en = score_seq
 

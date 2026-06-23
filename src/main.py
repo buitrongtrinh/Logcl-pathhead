@@ -25,6 +25,41 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def set_random_seed(seed):
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    dgl.seed(seed)
+    dgl.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def ensure_csv_schema(filename, fieldnames):
+    """Add new experiment columns without discarding existing CSV rows."""
+    if not os.path.isfile(filename):
+        with open(filename, 'w', newline='') as csv_file:
+            csv.DictWriter(csv_file, fieldnames=fieldnames).writeheader()
+        return
+
+    with open(filename, newline='') as csv_file:
+        reader = csv.DictReader(csv_file)
+        old_fieldnames = reader.fieldnames or []
+        rows = list(reader)
+
+    if old_fieldnames == fieldnames:
+        return
+
+    with open(filename, 'w', newline='') as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
     # 根据输入的每一个时间的图来更新查询查询
     inverse_subg = subg_arr[:, [2, 1, 0]]
@@ -127,17 +162,26 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     ranks_raw_r_inv, ranks_filter_r_inv, mrr_raw_list_r_inv, mrr_filter_list_r_inv = [], [], [], []
     ranks_raw1, ranks_filter1 = [],[]
 
+    dump_ranks_path = getattr(args, 'dump_ranks', None)
+    dump_rows = [] if dump_ranks_path else None
+
     idx = 0
     if mode == "test":
         # test mode: load parameter form file
         print("------------store_path----------------",model_name)
         if use_cuda:
-            checkpoint = torch.load(model_name, map_location=torch.device(args.gpu))
+            checkpoint = torch.load(model_name, map_location=torch.device('cuda:{}'.format(args.gpu)))
         else:
             checkpoint = torch.load(model_name, map_location=torch.device('cpu'))
         print("Load Model name: {}. Using best epoch : {}".format(model_name, checkpoint['epoch']))  # use best stat checkpoint
         print("\n"+"-"*10+"start testing"+"-"*10+"\n")
-        model.load_state_dict(checkpoint['state_dict'])
+        _res = model.load_state_dict(checkpoint['state_dict'], strict=False)
+        if _res.missing_keys:
+            print("[load][CANH BAO] thieu %d key (co the nap nham checkpoint): %s"
+                  % (len(_res.missing_keys), _res.missing_keys[:5]))
+        if _res.unexpected_keys:
+            print("[load] bo qua %d key du: %s"
+                  % (len(_res.unexpected_keys), _res.unexpected_keys[:5]))
 
     model.eval()
     # do not have inverse relation in test input
@@ -169,6 +213,15 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
         ranks_filter.append(rank_filter)
         ranks_raw_inv.append(rank_raw_inv)
         ranks_filter_inv.append(rank_filter_inv)
+        if dump_rows is not None:
+            tt = test_triples.detach().cpu().numpy()
+            it = inv_test_triples.detach().cpu().numpy()
+            rr = rank_raw.detach().cpu().numpy(); rf = rank_filter.detach().cpu().numpy()
+            rri = rank_raw_inv.detach().cpu().numpy(); rfi = rank_filter_inv.detach().cpu().numpy()
+            for k in range(tt.shape[0]):
+                dump_rows.append((time_idx, 'fwd', int(tt[k, 0]), int(tt[k, 1]), int(tt[k, 2]), int(rr[k]), int(rf[k])))
+            for k in range(it.shape[0]):
+                dump_rows.append((time_idx, 'inv', int(it[k, 0]), int(it[k, 1]), int(it[k, 2]), int(rri[k]), int(rfi[k])))
             # used to show slide results
         if args.multi_step:
             if not args.relation_evaluation:    
@@ -185,6 +238,14 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
             # print(np.shape(subg_arr))
         idx += 1
 
+    if dump_rows is not None:
+        import csv as _csv
+        with open(dump_ranks_path, 'w', newline='') as _f:
+            _w = _csv.writer(_f)
+            _w.writerow(['time', 'dir', 's', 'r', 'o', 'rank_raw', 'rank_filter'])
+            _w.writerows(dump_rows)
+        print("[dump-ranks] wrote %d rows -> %s" % (len(dump_rows), dump_ranks_path))
+
     mrr_raw,hit_raw = utils.stat_ranks(ranks_raw, "raw")
     mrr_filter,hit_filter = utils.stat_ranks(ranks_filter, "filter")
     mrr_raw_inv,hit_raw_inv = utils.stat_ranks(ranks_raw_inv, "raw_inv")
@@ -200,28 +261,31 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     
     # 文件转储
     if mode == "test": # test模式写入，train模式忽略
+        os.makedirs('./result', exist_ok=True)
         filename = './result/'+ args.dataset + ".csv"
-        if os.path.isfile(filename) == False:# 如果文件不存在，则创建
-            with open (filename,'w', newline='') as f:
-                # 写入列名
-                fieldnames=['encoder','opn','pre_type','use_static','use_cl','gpu','datetime','pre_weight',
-                            'train_len','test_len','temperature','lr','n_hidden',
-                            'filter_MRR','filter_H@1','filter_H@3','filter_H@10',
-                            'filter_inv_MRR','filter_inv_H@1','filter_inv_H@3','filter_inv_H@10',
-                            'all_MRR','all_H@1','all_H@3','all_H@10',
-                            'filter_all_MRR','filter_all_H@1','filter_all_H@3','filter_all_H@10']
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-        # 写入数据
-        with open (filename,'a', newline='') as f:
-            writer = csv.writer(f)
-            row={'encoder':args.encoder,'opn':args.opn,'pre_type':args.pre_type,'use_static':args.add_static_graph,'use_cl':args.use_cl,'gpu':args.gpu,'datetime':datetime.now(),'pre_weight':args.pre_weight,
-                'train_len':args.train_history_len,'test_len':args.test_history_len,'temperature':args.temperature,'lr':args.lr,'n_hidden':args.n_hidden,
-                'filter_MRR':float(mrr_filter),'filter_H@1':hit_filter[0],'filter_H@3':hit_filter[1],'filter_H@10':hit_filter[2],
-                'filter_inv_MRR':float(mrr_filter_inv),'filter_inv_H@1':hit_filter_inv[0],'filter_inv_H@3':hit_filter_inv[1],'filter_inv_H@10':hit_filter_inv[2],
-                'all_MRR':all_mrr_raw.item(),'all_H@1':all_hit_raw[0],'all_H@3':all_hit_raw[1],'all_H@10':all_hit_raw[2],
-                'filter_all_MRR':all_mrr_filter.item(),'filter_all_H@1':all_hit_filter[0],'filter_all_H@3':all_hit_filter[1],'filter_all_H@10':all_hit_filter[2]}
-            writer.writerow(row.values())
+        fieldnames=['encoder','opn','pre_type','use_static','use_cl','use_path','path_level',
+                    'path_dim','path_layers','path_batch_size','path_gamma','seed',
+                    'gpu','datetime','pre_weight','train_len','test_len','temperature','lr','n_hidden',
+                    'filter_MRR','filter_H@1','filter_H@3','filter_H@10',
+                    'filter_inv_MRR','filter_inv_H@1','filter_inv_H@3','filter_inv_H@10',
+                    'all_MRR','all_H@1','all_H@3','all_H@10',
+                    'filter_all_MRR','filter_all_H@1','filter_all_H@3','filter_all_H@10']
+        ensure_csv_schema(filename, fieldnames)
+        path_gamma = model.path_gamma.item() if model.use_path else None
+        row={'encoder':args.encoder,'opn':args.opn,'pre_type':args.pre_type,
+             'use_static':args.add_static_graph,'use_cl':args.use_cl,'use_path':args.use_path,'path_level':args.path_level,
+             'path_dim':args.path_dim,'path_layers':args.path_layers,
+             'path_batch_size':args.path_batch_size,'path_gamma':path_gamma,'seed':args.seed,
+             'gpu':args.gpu,'datetime':datetime.now(),'pre_weight':args.pre_weight,
+             'train_len':args.train_history_len,'test_len':args.test_history_len,
+             'temperature':args.temperature,'lr':args.lr,'n_hidden':args.n_hidden,
+             'filter_MRR':float(mrr_filter),'filter_H@1':hit_filter[0],'filter_H@3':hit_filter[1],'filter_H@10':hit_filter[2],
+             'filter_inv_MRR':float(mrr_filter_inv),'filter_inv_H@1':hit_filter_inv[0],'filter_inv_H@3':hit_filter_inv[1],'filter_inv_H@10':hit_filter_inv[2],
+             'all_MRR':all_mrr_raw.item(),'all_H@1':all_hit_raw[0],'all_H@3':all_hit_raw[1],'all_H@10':all_hit_raw[2],
+             'filter_all_MRR':all_mrr_filter.item(),'filter_all_H@1':all_hit_filter[0],'filter_all_H@3':all_hit_filter[1],'filter_all_H@10':all_hit_filter[2]}
+        with open(filename, 'a', newline='') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+            writer.writerow(row)
             
     return all_mrr_raw, all_mrr_filter
     
@@ -251,9 +315,18 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     all_ans_list_r_test = utils.load_all_answers_for_time_filter(data.test, num_rels, num_nodes, True)
     all_ans_list_valid = utils.load_all_answers_for_time_filter(data.valid, num_rels, num_nodes, False)
     all_ans_list_r_valid = utils.load_all_answers_for_time_filter(data.valid, num_rels, num_nodes, True)
-    model_name = "{}-len{}-gpu{}-lr{}-{}-{}-{}-{}-{}-{}-{}"\
-        .format(args.dataset, args.train_history_len, args.gpu, args.lr, args.temperature,args.pre_weight, args.use_cl, args.pre_type,  args.n_hidden, args.encoder,str(time.time()))
-    model_state_file = './models/' + model_name+ ".pt"
+    if args.test:
+        if not args.checkpoint:
+            raise ValueError("--checkpoint is required with --test")
+        model_state_file = args.checkpoint
+        if not os.path.isfile(model_state_file):
+            raise FileNotFoundError("Checkpoint not found: {}".format(model_state_file))
+        model_name = os.path.splitext(os.path.basename(model_state_file))[0]
+    else:
+        model_name = "{}-len{}-gpu{}-lr{}-{}-{}-{}-{}-{}-{}-path{}-{}"\
+            .format(args.dataset, args.train_history_len, args.gpu, args.lr, args.temperature,args.pre_weight, args.use_cl, args.pre_type,  args.n_hidden, args.encoder, args.use_path, str(time.time()))
+        model_state_file = './models/' + model_name+ ".pt"
+    os.makedirs('./models', exist_ok=True)
     print("Sanity Check: stat name : {}".format(model_state_file))
     print("Sanity Check: Is cuda available ? {}".format(torch.cuda.is_available()))
 
@@ -303,7 +376,12 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                         relation_prediction=args.relation_prediction,
                         use_cuda=use_cuda,
                         gpu = args.gpu,
-                        analysis=args.run_analysis)
+                        analysis=args.run_analysis,
+                        use_path=args.use_path,
+                        path_dim=args.path_dim,
+                        path_layers=args.path_layers,
+                        path_batch_size=args.path_batch_size,
+                        path_level=args.path_level)
 
     if use_cuda:
         torch.cuda.set_device(args.gpu)
@@ -315,7 +393,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
-    if args.test and os.path.exists(model_state_file):
+    if args.test:
         mrr_raw, mrr_filter= test(model,
                                 train_list+valid_list, 
                                 test_list, 
@@ -327,8 +405,6 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                                 model_state_file, 
                                 static_graph, 
                                 "test")
-    elif args.test and not os.path.exists(model_state_file):
-        print("--------------{} not exist, Change mode to train and generate stat for testing----------------\n".format(model_state_file))
     else:
         print("----------------------------------------start training----------------------------------------\n")
         best_mrr = 0
@@ -381,8 +457,9 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     optimizer.step()
                     optimizer.zero_grad()
                 # break
-            print("Epoch {:04d} | Ave Loss: {:.4f} | entity-relation-static:{:.4f}-{:.4f}-{:.4f} Best MRR {:.4f} | Model {} "
-                  .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_static), best_mrr, model_name))
+            path_gamma = model.path_gamma.item() if model.use_path else 0.0
+            print("Epoch {:04d} | Ave Loss: {:.4f} | entity-relation-static:{:.4f}-{:.4f}-{:.4f} Path gamma {:.6f} Best MRR {:.4f} | Model {} "
+                  .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_static), path_gamma, best_mrr, model_name))
 
             # validation
             if epoch and epoch % args.evaluate_every == 0:
@@ -408,7 +485,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     else:
                         his_best=0
                         best_mrr = mrr_filter
-                        torch.save({'state_dict': model.state_dict(), 'epoch': epoch}, model_state_file)
+                        torch.save({'state_dict': model.state_dict(), 'epoch': epoch,
+                                    'config': vars(args)}, model_state_file)
             torch.cuda.empty_cache()
         mrr_raw, mrr_filter = test(model, 
                             train_list+valid_list,
@@ -435,6 +513,8 @@ if __name__ == '__main__':
                         help="dataset to use")
     parser.add_argument("--test", action='store_true', default=False,
                         help="load stat from dir and directly test")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="checkpoint path required by --test")
     parser.add_argument("--run-analysis", action='store_true', default=False,
                         help="print log info")
     parser.add_argument("--run-statistic", action='store_true', default=False,
@@ -450,9 +530,20 @@ if __name__ == '__main__':
     parser.add_argument("--relation-evaluation", action='store_true', default=False,
                         help="save model accordding to the relation evalution")
     parser.add_argument("--pre-type",  type=str, default="short",
-                        help=["long","short", "all"])
+                        help="prediction type: long, short, or all")
     parser.add_argument("--use-cl",  action='store_true', default=False,
                         help="use the info of  contrastive learning")
+    parser.add_argument("--use-path", action='store_true', default=False,
+                        help="enable the two-hop path head")
+    parser.add_argument("--path-dim", type=int, default=32,
+                        help="path head hidden dimension")
+    parser.add_argument("--path-layers", type=int, default=2,
+                        help="number of path message-passing layers")
+    parser.add_argument("--path-batch-size", type=int, default=16,
+                        help="number of path queries per memory-saving chunk")
+    parser.add_argument("--path-level", type=int, default=2, choices=[1, 2],
+                        help="path fusion depth: 1=shallow (static emb_rel, path_out), "
+                             "2=deep (evolved hr/embedding, query-conditioned scoring)")
     parser.add_argument("--temperature", type=float, default=0.07,
                         help="the temperature of cl")
     # configuration for encoder RGCN stat
@@ -502,6 +593,10 @@ if __name__ == '__main__':
                         help="learning rate")
     parser.add_argument("--grad-norm", type=float, default=1.0,
                         help="norm to clip gradient to")
+    parser.add_argument("--dump-ranks", type=str, default=None,
+                        help="neu dat, xuat rank tung truy van (test) ra CSV de phan tich chuyen dich dung/sai")
+    parser.add_argument("--seed", type=int, default=123,
+                        help="random seed for Python, NumPy, Torch, CUDA, and DGL")
 
     # configuration for evaluating
     parser.add_argument("--evaluate-every", type=int, default=1,
@@ -527,6 +622,9 @@ if __name__ == '__main__':
 
 
     args = parser.parse_args()
+    if args.test and not args.checkpoint:
+        parser.error("--checkpoint is required with --test")
+    set_random_seed(args.seed)
     print(args)
     args.__dict__["test_history_len"] = args.__dict__["train_history_len"]
 

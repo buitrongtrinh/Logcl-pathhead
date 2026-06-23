@@ -1,0 +1,35 @@
+# === Dữ liệu & sản phẩm sinh ra (NẶNG — không push) ===
+# data/ = bản giải nén của data.zip + history subgraph (his_dict, his_graph_*) ~26GB.
+# Người clone tự chạy phần "Process data" trong README để sinh lại.
+data/
+# Checkpoint mô hình (~254MB) — sinh ra khi train.
+models/
+*.pt
+*.pth
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.ipynb_checkpoints/
+
+# === Môi trường ảo ===
+.venv/
+venv/
+env/
+.env
+
+# === IDE / OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------------------------------------
+# CỐ TÌNH GIỮ LẠI (không ignore):
+#   data.zip          -> dataset nguồn để unpack (theo README)
+#   result/*.csv       -> bảng metric (nhỏ, dùng cho báo cáo)
+#   ranks_*.csv        -> rank dump để chạy analyze_*.py (mỗi file ~330KB)
+#   analyze_*.py       -> script phân tích
+# ----------------------------------------------------------------------
