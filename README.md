@@ -183,58 +183,167 @@ python get_his_subg.py
 ```
 
 ## Train models
-Then the following commands can be used to train the proposed models. By default, dev set evaluation results will be printed when training terminates.
 
-We compare two configurations, each trained on **3 seeds** (`123 42 2023`) for a
-fair, reproducible comparison:
+For each dataset we train **two configurations**, each on **3 seeds** (`123 42 2023`):
 
 - **Baseline** — LogCL with contrastive learning (`--use-cl`), **no** Path Head.
-- **Level 2** — same as baseline **plus** the two-hop Path Head (`--use-path`,
-  `--path-level 2`).
+- **Level 2** — same as baseline **plus** the two-hop Path Head (`--use-path --path-level 2`).
 
-The two configurations are **identical in every flag except `--use-path`**, so
-any difference in results comes purely from the Path Head. Each run dumps its
-per-query ranks to a seed-specific CSV (`--dump-ranks`).
+The two configs are **identical in every flag except `--use-path`**, so any difference
+comes purely from the Path Head. Every run dumps per-query ranks into `ranks/`.
 
-1. Baseline (no Path Head), 3 seeds:
+### Per-dataset hyperparameters
 
+Only `--train-history-len` differs between datasets; everything else is shared
+(`--n-hidden 200 --lr 0.001 --n-layers 2`, static graph, CL `--temperature 0.03`, etc.).
+
+| Dataset | `--train-history-len` | Notes |
+|---|:---:|---|
+| ICEWS14 | 7 | smallest, fast |
+| ICEWS18 | 9 | large (23K entities) — Level 2 may OOM, lower `--path-batch-size` to `8`/`4` |
+| ICEWS05-15 | 15 | very long (4017 timestamps) — slow preprocessing & training |
+
+> The ICEWS18 / ICEWS05-15 history lengths are reasonable defaults; tune them per the paper if needed.
+
+Each run writes a checkpoint to `./models/`, appends a metrics row to
+`./result/<dataset>.csv`, and a rank CSV to `ranks/`. Report the mean ± std of the
+metrics across the 3 seeds.
+
+> All commands below assume `data.zip` is already unpacked (see **Process data**).
+> Each dataset block is self-contained: run **Preprocess** once, then **Train**.
+
+### 1. ICEWS14
+
+**Preprocess (run once):**
 ```bash
+cd data
+sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS14"]/' get_his_subg.py
+(cd ICEWS14 && python ent2word.py)   # static graph -> e-w-graph.txt
+python get_his_subg.py               # history subgraph -> his_dict/, his_graph_*/
+cd ..
+```
+
+**Train — Baseline (3 seeds):**
+```bash
+COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
+  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
+  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
+  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
+  --add-static-graph --use-cl --temperature 0.03"
+
 for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS14 \
-    --train-history-len 7 --test-history-len 7 --dilate-len 1 \
-    --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu=0 --n-hidden 200 --self-loop \
-    --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-    --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-    --add-static-graph --use-cl --temperature 0.03 \
-    --seed $SEED \
-    --dump-ranks ranks_base_seed${SEED}.csv
+  python src/main.py -d ICEWS14 $COMMON --seed $SEED \
+    --dump-ranks ranks/ranks_base_ICEWS14_seed${SEED}.csv
 done
 ```
 
-2. Level 2 — two-hop Path Head, 3 seeds. `--path-batch-size` controls Path Head
-memory usage; use `8` if `16` still exceeds the available GPU memory.
-
+**Train — Level 2 (3 seeds):**
 ```bash
+COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
+  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
+  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
+  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
+  --add-static-graph --use-cl --temperature 0.03"
+
 for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS14 \
-    --train-history-len 7 --test-history-len 7 --dilate-len 1 \
-    --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu=0 --n-hidden 200 --self-loop \
-    --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-    --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-    --add-static-graph --use-cl --temperature 0.03 \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 128 --path-level 2 \
+  python src/main.py -d ICEWS14 $COMMON \
+    --use-path --path-dim 32 --path-layers 2 --path-batch-size 16 --path-level 2 \
     --seed $SEED \
-    --dump-ranks ranks_m2_seed${SEED}.csv
+    --dump-ranks ranks/ranks_m2_ICEWS14_seed${SEED}.csv
 done
 ```
 
-Each run produces a checkpoint under `./models/`, appends one metrics row to
-`./result/ICEWS14.csv`, and writes the rank CSV named above. Report the mean and
-standard deviation of the metrics across the 3 seeds for each configuration.
+### 2. ICEWS18
 
-3. Test a saved checkpoint. Testing requires an explicit checkpoint path and
-the same architecture flags used for training. For a **baseline** checkpoint,
-drop the `--use-path ...` flags below.
+Larger graph → Level 2 may run out of GPU memory; drop `--path-batch-size` to `8` or `4`.
+
+**Preprocess (run once):**
+```bash
+cd data
+sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS18"]/' get_his_subg.py
+(cd ICEWS18 && python ent2word.py)
+python get_his_subg.py
+cd ..
+```
+
+**Train — Baseline (3 seeds):**
+```bash
+COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
+  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
+  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
+  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
+  --add-static-graph --use-cl --temperature 0.03"
+
+for SEED in 123 42 2023; do
+  python src/main.py -d ICEWS18 $COMMON --seed $SEED \
+    --dump-ranks ranks/ranks_base_ICEWS18_seed${SEED}.csv
+done
+```
+
+**Train — Level 2 (3 seeds):** lower `--path-batch-size` to `4` if it still OOMs.
+```bash
+COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
+  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
+  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
+  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
+  --add-static-graph --use-cl --temperature 0.03"
+
+for SEED in 123 42 2023; do
+  python src/main.py -d ICEWS18 $COMMON \
+    --use-path --path-dim 32 --path-layers 2 --path-batch-size 8 --path-level 2 \
+    --seed $SEED \
+    --dump-ranks ranks/ranks_m2_ICEWS18_seed${SEED}.csv
+done
+```
+
+### 3. ICEWS05-15
+
+Very long timeline → preprocessing and training take much longer.
+
+**Preprocess (run once — slow):**
+```bash
+cd data
+sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS05-15"]/' get_his_subg.py
+(cd ICEWS05-15 && python ent2word.py)
+python get_his_subg.py
+cd ..
+```
+
+**Train — Baseline (3 seeds):**
+```bash
+COMMON="--train-history-len 15 --test-history-len 15 --dilate-len 1 --lr 0.001 \
+  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
+  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
+  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
+  --add-static-graph --use-cl --temperature 0.03"
+
+for SEED in 123 42 2023; do
+  python src/main.py -d ICEWS05-15 $COMMON --seed $SEED \
+    --dump-ranks ranks/ranks_base_ICEWS05-15_seed${SEED}.csv
+done
+```
+
+**Train — Level 2 (3 seeds):**
+```bash
+COMMON="--train-history-len 15 --test-history-len 15 --dilate-len 1 --lr 0.001 \
+  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
+  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
+  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
+  --add-static-graph --use-cl --temperature 0.03"
+
+for SEED in 123 42 2023; do
+  python src/main.py -d ICEWS05-15 $COMMON \
+    --use-path --path-dim 32 --path-layers 2 --path-batch-size 8 --path-level 2 \
+    --seed $SEED \
+    --dump-ranks ranks/ranks_m2_ICEWS05-15_seed${SEED}.csv
+done
+```
+
+### Test a saved checkpoint
+
+Testing needs an explicit checkpoint and the **same architecture flags** used for
+training (match `--train-history-len` to the dataset; for a **baseline** checkpoint
+drop the `--use-path ...` flags).
 
 ```bash
 python src/main.py -d ICEWS14 --test \
@@ -243,8 +352,21 @@ python src/main.py -d ICEWS14 --test \
   --decoder convtranse --encoder uvrgcn --layer-norm \
   --pre-weight 0.9 --pre-type all --add-static-graph --use-cl \
   --train-history-len 7 --test-history-len 7 --temperature 0.03 \
-  --use-path --path-dim 32 --path-layers 2 --path-batch-size 16 \
-  --seed 123
+  --use-path --path-dim 32 --path-layers 2 --path-batch-size 16 --path-level 2 \
+  --seed 123 --dump-ranks ranks/ranks_m2_ICEWS14_test.csv
+```
+
+### Analysis
+
+After training, scripts in `analysis/` consume the rank CSVs in `ranks/` (run from repo root):
+
+```bash
+# seed stability of one config
+python analysis/analyze_stability.py --files ranks/ranks_base_ICEWS14_seed*.csv
+# baseline vs Level 2 (McNemar transition)
+python analysis/analyze_transition.py --base ranks/ranks_base_ICEWS14_seed123.csv --new ranks/ranks_m2_ICEWS14_seed123.csv
+# repetitive vs new facts
+python analysis/analyze_seen_unseen.py -d ICEWS14 --base ranks/ranks_base_ICEWS14_seed123.csv --new ranks/ranks_m2_ICEWS14_seed123.csv
 ```
 ## Cite
 Please cite our paper if you find this code useful for your research.
