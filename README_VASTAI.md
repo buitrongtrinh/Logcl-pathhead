@@ -58,7 +58,7 @@ cd .. && mkdir -p ranks
 
 ### Khai báo COMMON (1 lần / shell)
 ```bash
-COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03"
+COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03"
 PATH_FLAGS="--use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2"
 ```
 
@@ -76,9 +76,11 @@ python src/main.py -d ICEWS18 $COMMON $PATH_FLAGS --seed 42   --dump-ranks ranks
 python src/main.py -d ICEWS18 $COMMON $PATH_FLAGS --seed 2023 --dump-ranks ranks/ranks_m2_ICEWS18_seed2023.csv
 ```
 
-> **Đổi dataset:** thay `ICEWS18` → `ICEWS14` (`--train-history-len 7`) hoặc `ICEWS05-15`
-> (`--train-history-len 15`), và **sed lại `get_his_subg.py`** về đúng dataset trước khi preprocess.
-> Tham số chi tiết từng dataset xem **README.md** mục *Train models*.
+> **Đổi dataset** (tham số theo paper):
+> - **ICEWS14** / **ICEWS18**: `--train-history-len 7 --temperature 0.03`
+> - **ICEWS05-15**: `--train-history-len 9 --temperature 0.07`
+>
+> Nhớ **sed lại `get_his_subg.py`** về đúng dataset trước khi preprocess. Chi tiết xem **README.md** mục *Train models*.
 
 ---
 

@@ -194,16 +194,18 @@ comes purely from the Path Head. Every run dumps per-query ranks into `ranks/`.
 
 ### Per-dataset hyperparameters
 
-Only `--train-history-len` differs between datasets; everything else is shared
-(`--n-hidden 200 --lr 0.001 --n-layers 2`, static graph, CL `--temperature 0.03`, etc.).
+`--train-history-len` and `--temperature` differ between datasets; everything else is
+shared (`--n-hidden 200 --lr 0.001 --n-layers 2`, static graph, etc.).
 
-| Dataset | `--train-history-len` | Notes |
-|---|:---:|---|
-| ICEWS14 | 7 | smallest, fast |
-| ICEWS18 | 9 | largest (23K entities) — heaviest for Level 2 |
-| ICEWS05-15 | 15 | very long (4017 timestamps) — slow preprocessing & training |
+| Dataset | `--train-history-len` | `--temperature` | Notes |
+|---|:---:|:---:|---|
+| ICEWS14 | 7 | 0.03 | smallest, fast |
+| ICEWS18 | 7 | 0.03 | largest (23K entities) — heaviest for Level 2 |
+| ICEWS05-15 | 9 | 0.07 | very long (4017 timestamps) — slow preprocessing & training |
 
-> The ICEWS18 / ICEWS05-15 history lengths are reasonable defaults; tune them per the paper if needed.
+> Values taken from the **LogCL paper** (Implementation Details): history lengths
+> **7 / 7 / 9** and temperatures **0.03 / 0.03 / 0.07** for ICEWS14 / ICEWS18 / ICEWS05-15.
+> (GDELT: length 7, temperature 0.07, **no** static graph.)
 
 > **`--path-batch-size 64`** is tuned for a **16 GB GPU** (e.g. RTX A4000): it only
 > chunks the Path Head computation for memory — it does **not** change results, only
@@ -273,7 +275,7 @@ cd ..
 
 **Train — Baseline (3 seeds):**
 ```bash
-COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
+COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
   --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
   --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
   --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
@@ -287,7 +289,7 @@ done
 
 **Train — Level 2 (3 seeds):** heaviest config; if `CUDA out of memory`, lower `--path-batch-size` to `32`/`16`.
 ```bash
-COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
+COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
   --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
   --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
   --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
@@ -316,11 +318,11 @@ cd ..
 
 **Train — Baseline (3 seeds):**
 ```bash
-COMMON="--train-history-len 15 --test-history-len 15 --dilate-len 1 --lr 0.001 \
+COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
   --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
   --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
   --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.03"
+  --add-static-graph --use-cl --temperature 0.07"
 
 for SEED in 123 42 2023; do
   python src/main.py -d ICEWS05-15 $COMMON --seed $SEED \
@@ -330,11 +332,11 @@ done
 
 **Train — Level 2 (3 seeds):**
 ```bash
-COMMON="--train-history-len 15 --test-history-len 15 --dilate-len 1 --lr 0.001 \
+COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
   --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
   --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
   --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.03"
+  --add-static-graph --use-cl --temperature 0.07"
 
 for SEED in 123 42 2023; do
   python src/main.py -d ICEWS05-15 $COMMON \
