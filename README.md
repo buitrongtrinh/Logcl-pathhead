@@ -202,6 +202,7 @@ shared (`--n-hidden 200 --lr 0.001 --n-layers 2`, static graph, etc.).
 | ICEWS14 | 7 | 0.03 | smallest, fast |
 | ICEWS18 | 7 | 0.03 | largest (23K entities) — heaviest for Level 2 |
 | ICEWS05-15 | 9 | 0.07 | very long (4017 timestamps) — slow preprocessing & training |
+| GDELT | 7 | 0.07 | huge (1.7M facts) — **no static graph** (drop `--add-static-graph`); not in bundled `data.zip` |
 
 > Values taken from the **LogCL paper** (Implementation Details): history lengths
 > **7 / 7 / 9** and temperatures **0.03 / 0.03 / 0.07** for ICEWS14 / ICEWS18 / ICEWS05-15.
@@ -213,8 +214,11 @@ shared (`--n-hidden 200 --lr 0.001 --n-layers 2`, static graph, etc.).
 > hit `CUDA out of memory`; raise it (`128`) only on ≥24 GB GPUs.
 
 Each run writes a checkpoint to `./models/`, appends a metrics row to
-`./result/<dataset>.csv`, and a rank CSV to `ranks/`. Report the mean ± std of the
-metrics across the 3 seeds.
+`./result/<dataset>.csv`, and a rank CSV to `ranks/`.
+
+The commands below use **seed 123**. For the full 3-seed average, rerun each with
+`--seed 42` and `--seed 2023` (change the `--dump-ranks` filename to match), then report
+mean ± std across the 3 seeds.
 
 > All commands below assume `data.zip` is already unpacked (see **Process data**).
 > Each dataset block is self-contained: run **Preprocess** once, then **Train**.
@@ -230,34 +234,14 @@ python get_his_subg.py               # history subgraph -> his_dict/, his_graph_
 cd ..
 ```
 
-**Train — Baseline (3 seeds):**
+**Train — Baseline (seed 123):**
 ```bash
-COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
-  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
-  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.03"
-
-for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS14 $COMMON --seed $SEED \
-    --dump-ranks ranks/ranks_base_ICEWS14_seed${SEED}.csv
-done
+python src/main.py -d ICEWS14 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --seed 123 --dump-ranks ranks/ranks_base_ICEWS14_seed123.csv
 ```
 
-**Train — Level 2 (3 seeds):**
+**Train — Level 2 (seed 123):**
 ```bash
-COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
-  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
-  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.03"
-
-for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS14 $COMMON \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
-    --seed $SEED \
-    --dump-ranks ranks/ranks_m2_ICEWS14_seed${SEED}.csv
-done
+python src/main.py -d ICEWS14 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_ICEWS14_seed123.csv
 ```
 
 ### 2. ICEWS18
@@ -273,34 +257,14 @@ python get_his_subg.py
 cd ..
 ```
 
-**Train — Baseline (3 seeds):**
+**Train — Baseline (seed 123):**
 ```bash
-COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
-  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
-  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.03"
-
-for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS18 $COMMON --seed $SEED \
-    --dump-ranks ranks/ranks_base_ICEWS18_seed${SEED}.csv
-done
+python src/main.py -d ICEWS18 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --seed 123 --dump-ranks ranks/ranks_base_ICEWS18_seed123.csv
 ```
 
-**Train — Level 2 (3 seeds):** heaviest config; if `CUDA out of memory`, lower `--path-batch-size` to `32`/`16`.
+**Train — Level 2 (seed 123):** if `CUDA out of memory`, lower `--path-batch-size` to `32`/`16`.
 ```bash
-COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 \
-  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
-  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.03"
-
-for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS18 $COMMON \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
-    --seed $SEED \
-    --dump-ranks ranks/ranks_m2_ICEWS18_seed${SEED}.csv
-done
+python src/main.py -d ICEWS18 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_ICEWS18_seed123.csv
 ```
 
 ### 3. ICEWS05-15
@@ -316,34 +280,38 @@ python get_his_subg.py
 cd ..
 ```
 
-**Train — Baseline (3 seeds):**
+**Train — Baseline (seed 123):**
 ```bash
-COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
-  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
-  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.07"
-
-for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS05-15 $COMMON --seed $SEED \
-    --dump-ranks ranks/ranks_base_ICEWS05-15_seed${SEED}.csv
-done
+python src/main.py -d ICEWS05-15 --train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.07 --seed 123 --dump-ranks ranks/ranks_base_ICEWS05-15_seed123.csv
 ```
 
-**Train — Level 2 (3 seeds):**
+**Train — Level 2 (seed 123):**
 ```bash
-COMMON="--train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 \
-  --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop \
-  --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 \
-  --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all \
-  --add-static-graph --use-cl --temperature 0.07"
+python src/main.py -d ICEWS05-15 --train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.07 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_ICEWS05-15_seed123.csv
+```
 
-for SEED in 123 42 2023; do
-  python src/main.py -d ICEWS05-15 $COMMON \
-    --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 \
-    --seed $SEED \
-    --dump-ranks ranks/ranks_m2_ICEWS05-15_seed${SEED}.csv
-done
+### 4. GDELT
+
+Huge (1.7M facts, 2975 timestamps) and **does not use the static graph** — drop
+`--add-static-graph` and use `--temperature 0.07`. **Not included in the bundled
+`data.zip`**: add `data/GDELT/{train,valid,test,stat}.txt` yourself first.
+
+**Preprocess (run once — no static graph → no `ent2word.py`):**
+```bash
+cd data
+sed -i 's/^dataset_list = .*/dataset_list = ["GDELT"]/' get_his_subg.py
+python get_his_subg.py
+cd ..
+```
+
+**Train — Baseline (seed 123):**
+```bash
+python src/main.py -d GDELT --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --use-cl --temperature 0.07 --seed 123 --dump-ranks ranks/ranks_base_GDELT_seed123.csv
+```
+
+**Train — Level 2 (seed 123):**
+```bash
+python src/main.py -d GDELT --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --use-cl --temperature 0.07 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_GDELT_seed123.csv
 ```
 
 ### Test a saved checkpoint

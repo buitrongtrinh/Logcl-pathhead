@@ -39,7 +39,7 @@ Phải thấy **`cuda: True`** mới đi tiếp. (Dòng "DGL backend... Assuming
 
 ---
 
-## 3. Chạy một dataset (ví dụ ICEWS18)
+## 3. Chạy — lệnh đầy đủ từng dataset (seed 123)
 
 **Dùng `tmux`** để train không chết khi rớt SSH:
 ```bash
@@ -47,40 +47,52 @@ tmux new -s train        # rớt mạng: ssh lại rồi `tmux attach -t train`
                          # chạy ngầm: Ctrl+b rồi d
 ```
 
-### Tiền xử lý (1 lần)
+Mỗi dataset = **3 lệnh**: preprocess → baseline → mức 2. Seed **42**/**2023**: đổi `--seed` + tên file `--dump-ranks`.
+
+### ICEWS14
 ```bash
-cd data
-sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS18"]/' get_his_subg.py
-(cd ICEWS18 && python ent2word.py)
-python get_his_subg.py
-cd .. && mkdir -p ranks
+cd data && sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS14"]/' get_his_subg.py && (cd ICEWS14 && python ent2word.py) && python get_his_subg.py && cd .. && mkdir -p ranks
+```
+```bash
+python src/main.py -d ICEWS14 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --seed 123 --dump-ranks ranks/ranks_base_ICEWS14_seed123.csv
+```
+```bash
+python src/main.py -d ICEWS14 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_ICEWS14_seed123.csv
 ```
 
-### Khai báo COMMON (1 lần / shell)
+### ICEWS18
 ```bash
-COMMON="--train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03"
-PATH_FLAGS="--use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2"
+cd data && sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS18"]/' get_his_subg.py && (cd ICEWS18 && python ent2word.py) && python get_his_subg.py && cd .. && mkdir -p ranks
+```
+```bash
+python src/main.py -d ICEWS18 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --seed 123 --dump-ranks ranks/ranks_base_ICEWS18_seed123.csv
+```
+```bash
+python src/main.py -d ICEWS18 --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.03 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_ICEWS18_seed123.csv
 ```
 
-### Baseline — từng seed
+### ICEWS05-15
 ```bash
-python src/main.py -d ICEWS18 $COMMON --seed 123  --dump-ranks ranks/ranks_base_ICEWS18_seed123.csv
-python src/main.py -d ICEWS18 $COMMON --seed 42   --dump-ranks ranks/ranks_base_ICEWS18_seed42.csv
-python src/main.py -d ICEWS18 $COMMON --seed 2023 --dump-ranks ranks/ranks_base_ICEWS18_seed2023.csv
+cd data && sed -i 's/^dataset_list = .*/dataset_list = ["ICEWS05-15"]/' get_his_subg.py && (cd ICEWS05-15 && python ent2word.py) && python get_his_subg.py && cd .. && mkdir -p ranks
+```
+```bash
+python src/main.py -d ICEWS05-15 --train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.07 --seed 123 --dump-ranks ranks/ranks_base_ICEWS05-15_seed123.csv
+```
+```bash
+python src/main.py -d ICEWS05-15 --train-history-len 9 --test-history-len 9 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --add-static-graph --use-cl --temperature 0.07 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_ICEWS05-15_seed123.csv
 ```
 
-### Mức 2 (Path Head) — từng seed
+### GDELT
+*(không static graph; **không có trong `data.zip`** → tự thêm `data/GDELT/{train,valid,test,stat}.txt` trước)*
 ```bash
-python src/main.py -d ICEWS18 $COMMON $PATH_FLAGS --seed 123  --dump-ranks ranks/ranks_m2_ICEWS18_seed123.csv
-python src/main.py -d ICEWS18 $COMMON $PATH_FLAGS --seed 42   --dump-ranks ranks/ranks_m2_ICEWS18_seed42.csv
-python src/main.py -d ICEWS18 $COMMON $PATH_FLAGS --seed 2023 --dump-ranks ranks/ranks_m2_ICEWS18_seed2023.csv
+cd data && sed -i 's/^dataset_list = .*/dataset_list = ["GDELT"]/' get_his_subg.py && python get_his_subg.py && cd .. && mkdir -p ranks
 ```
-
-> **Đổi dataset** (tham số theo paper):
-> - **ICEWS14** / **ICEWS18**: `--train-history-len 7 --temperature 0.03`
-> - **ICEWS05-15**: `--train-history-len 9 --temperature 0.07`
->
-> Nhớ **sed lại `get_his_subg.py`** về đúng dataset trước khi preprocess. Chi tiết xem **README.md** mục *Train models*.
+```bash
+python src/main.py -d GDELT --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --use-cl --temperature 0.07 --seed 123 --dump-ranks ranks/ranks_base_GDELT_seed123.csv
+```
+```bash
+python src/main.py -d GDELT --train-history-len 7 --test-history-len 7 --dilate-len 1 --lr 0.001 --n-layers 2 --evaluate-every 1 --gpu 0 --n-hidden 200 --self-loop --decoder convtranse --encoder uvrgcn --layer-norm --weight 0.5 --entity-prediction --angle 10 --discount 1 --pre-weight 0.9 --pre-type all --use-cl --temperature 0.07 --use-path --path-dim 32 --path-layers 2 --path-batch-size 64 --path-level 2 --seed 123 --dump-ranks ranks/ranks_m2_GDELT_seed123.csv
+```
 
 ---
 
