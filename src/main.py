@@ -287,8 +287,8 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writerow(row)
             
-    return all_mrr_raw, all_mrr_filter
-    
+    return all_mrr_raw, all_mrr_filter, all_hit_filter
+
 
 def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=None):
     # load configuration for grid search the best configuration
@@ -394,21 +394,30 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     if args.test:
-        mrr_raw, mrr_filter= test(model,
-                                train_list+valid_list, 
-                                test_list, 
-                                num_rels, 
-                                num_nodes, 
-                                use_cuda, 
-                                all_ans_list_test, 
-                                all_ans_list_r_test, 
-                                model_state_file, 
-                                static_graph, 
+        mrr_raw, mrr_filter, _hits = test(model,
+                                train_list+valid_list,
+                                test_list,
+                                num_rels,
+                                num_nodes,
+                                use_cuda,
+                                all_ans_list_test,
+                                all_ans_list_r_test,
+                                model_state_file,
+                                static_graph,
                                 "test")
     else:
         print("----------------------------------------start training----------------------------------------\n")
         best_mrr = 0
         his_best = 0
+        # Log per-epoch ra CSV de giu sau khi train xong (ve loss/MRR theo epoch)
+        os.makedirs('./logs', exist_ok=True)
+        epoch_log_path = './logs/' + model_name + '.csv'
+        with open(epoch_log_path, 'w', newline='') as _lf:
+            csv.writer(_lf).writerow(['epoch','time','loss','loss_e','loss_r','loss_static',
+                                       'path_gamma',
+                                       'val_mrr_filter','val_H@1','val_H@3','val_H@10',
+                                       'best_mrr','patience_left'])
+        print("[epoch-log] ghi log per-epoch -> {}".format(epoch_log_path))
         for epoch in range(args.n_epochs):
             model.train()
             losses = []
@@ -462,42 +471,74 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                   .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_static), path_gamma, best_mrr, model_name))
 
             # validation
+            val_mrr_this_epoch = None
+            val_h1_this_epoch = None
+            val_h3_this_epoch = None
+            val_h10_this_epoch = None
             if epoch and epoch % args.evaluate_every == 0:
-                mrr_raw, mrr_filter = test(model, 
-                                    train_list, 
-                                    valid_list, 
-                                    num_rels, 
-                                    num_nodes, 
-                                    use_cuda, 
-                                    all_ans_list_valid, 
-                                    all_ans_list_r_valid, 
-                                    model_state_file, 
-                                    static_graph, 
+                mrr_raw, mrr_filter, hits_filter = test(model,
+                                    train_list,
+                                    valid_list,
+                                    num_rels,
+                                    num_nodes,
+                                    use_cuda,
+                                    all_ans_list_valid,
+                                    all_ans_list_r_valid,
+                                    model_state_file,
+                                    static_graph,
                                     mode="train")
-                
+                val_mrr_this_epoch = float(mrr_filter)
+                val_h1_this_epoch  = float(hits_filter[0])
+                val_h3_this_epoch  = float(hits_filter[1])
+                val_h10_this_epoch = float(hits_filter[2])
+
                 if not args.relation_evaluation:  # entity prediction evalution
                     if mrr_filter < best_mrr:
                         his_best += 1
-                        if epoch >= args.n_epochs:
-                            break
-                        if his_best>=5:
-                            break
+                        _early_stop = (his_best >= 5) or (epoch >= args.n_epochs)
                     else:
                         his_best=0
                         best_mrr = mrr_filter
                         torch.save({'state_dict': model.state_dict(), 'epoch': epoch,
                                     'config': vars(args)}, model_state_file)
+                        _early_stop = False
+                else:
+                    _early_stop = False
+            else:
+                _early_stop = False
+
+            # Ghi 1 dong log CSV cho epoch nay (luon ghi, du co validate hay khong)
+            with open(epoch_log_path, 'a', newline='') as _lf:
+                csv.writer(_lf).writerow([
+                    epoch,
+                    datetime.now().isoformat(timespec='seconds'),
+                    float(np.mean(losses)),
+                    float(np.mean(losses_e)),
+                    float(np.mean(losses_r)),
+                    float(np.mean(losses_static)),
+                    path_gamma,
+                    val_mrr_this_epoch if val_mrr_this_epoch is not None else '',
+                    val_h1_this_epoch  if val_h1_this_epoch  is not None else '',
+                    val_h3_this_epoch  if val_h3_this_epoch  is not None else '',
+                    val_h10_this_epoch if val_h10_this_epoch is not None else '',
+                    float(best_mrr),
+                    max(0, 5 - his_best),
+                ])
+
             torch.cuda.empty_cache()
-        mrr_raw, mrr_filter = test(model, 
+            if _early_stop:
+                print("[early-stop] dung sau epoch {} (patience het)".format(epoch))
+                break
+        mrr_raw, mrr_filter, _hits = test(model,
                             train_list+valid_list,
-                            test_list, 
-                            num_rels, 
-                            num_nodes, 
-                            use_cuda, 
-                            all_ans_list_test, 
-                            all_ans_list_r_test, 
-                            model_state_file, 
-                            static_graph, 
+                            test_list,
+                            num_rels,
+                            num_nodes,
+                            use_cuda,
+                            all_ans_list_test,
+                            all_ans_list_r_test,
+                            model_state_file,
+                            static_graph,
                             mode="test")
     return mrr_raw, mrr_filter
 
