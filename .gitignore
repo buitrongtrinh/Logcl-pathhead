@@ -33,3 +33,5 @@ Thumbs.db
 #   ranks_*.csv        -> rank dump để chạy analyze_*.py (mỗi file ~330KB)
 #   analyze_*.py       -> script phân tích
 # ----------------------------------------------------------------------
+
+Thesis_Template
