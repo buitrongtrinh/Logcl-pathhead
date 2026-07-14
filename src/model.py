@@ -18,32 +18,25 @@ class BaseRGCN(nn.Module):
         self.encoder_name = encoder_name
         self.use_cuda = use_cuda
         self.run_analysis = analysis
-        self.skip_connect = skip_connect
         print("use layer :{}".format(encoder_name))
         self.rel_emb = rel_emb
         self.opn = opn
-        # create rgcn layers
         self.build_model()
-        # create initial features
         self.features = self.create_features()
 
     def build_model(self):
+        # Xếp chồng: lớp vào (tuỳ chọn) -> các lớp ẩn -> lớp ra (tuỳ chọn)
         self.layers = nn.ModuleList()
-        # i2h
         i2h = self.build_input_layer()
         if i2h is not None:
             self.layers.append(i2h)
-        # h2h
         for idx in range(self.num_hidden_layers):
-
             h2h = self.build_hidden_layer(idx)
             self.layers.append(h2h)
-        # h2o
         h2o = self.build_output_layer()
         if h2o is not None:
             self.layers.append(h2o)
 
-    # initialize feature for each node
     def create_features(self):
         return None
 
@@ -59,11 +52,7 @@ class BaseRGCN(nn.Module):
     def forward(self, g):
         if self.features is not None:
             g.ndata['id'] = self.features
-        print("h before GCN message passing")
-        print(g.ndata['h'])
-        print("h behind GCN message passing")
         for layer in self.layers:
             layer(g)
-        print(g.ndata['h'])
         return g.ndata.pop('h')
 

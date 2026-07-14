@@ -26,15 +26,14 @@ class RGCNLayer(nn.Module):
         if self.self_loop:
             self.loop_weight = nn.Parameter(torch.Tensor(in_feat, out_feat))
             nn.init.xavier_uniform_(self.loop_weight, gain=nn.init.calculate_gain('relu'))
-            # self.loop_weight = nn.Parameter(torch.eye(out_feat), requires_grad=False)
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,
                                     gain=nn.init.calculate_gain('relu'))
 
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
@@ -50,27 +49,20 @@ class RGCNLayer(nn.Module):
 
     def forward(self, g, prev_h=[]):
         if self.self_loop:
-            #print(self.loop_weight)
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
             if self.dropout is not None:
                 loop_message = self.dropout(loop_message)
-        # self.skip_connect_weight.register_hook(lambda g: print("grad of skip connect weight: {}".format(g)))
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
-            # print("skip_ weight")
-            # print(skip_weight)
-            # print("skip connect weight")
-            # print(self.skip_connect_weight)
-            # print(torch.mm(prev_h, self.skip_connect_weight))
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
 
-        self.propagate(g)  # 这里是在计算从周围节点传来的信息
+        # Gộp thông điệp truyền đến từ các node lân cận
+        self.propagate(g)
 
-        # apply bias and activation
         node_repr = g.ndata['h']
         if self.bias:
             node_repr = node_repr + self.bias
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:   # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             previous_node_repr = (1 - skip_weight) * prev_h
             if self.activation:
                 node_repr = self.activation(node_repr)
@@ -88,8 +80,6 @@ class RGCNLayer(nn.Module):
                 node_repr = self.normalization_layer(node_repr)
             if self.activation:
                 node_repr = self.activation(node_repr)
-            # print("node_repr")
-            # print(node_repr)
         g.ndata['h'] = node_repr
         return node_repr
 
@@ -176,7 +166,6 @@ class RGCNBlockLayer(RGCNLayer):
 
     def propagate(self, g):
         g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
-        # g.updata_all ({'msg': msg} , fn.sum(msg='msg', out='h'), {'h': nodes.data['h'] * nodes.data[''norm]})
 
     def apply_func(self, nodes):
         return {'h': nodes.data['h'] * nodes.data['norm']}
@@ -198,7 +187,7 @@ class UnionRGCNLayer(nn.Module):
         self.ob = None
         self.sub = None
 
-        # WL
+        # Trọng số chiếu thông điệp nhận từ lân cận
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
@@ -209,10 +198,10 @@ class UnionRGCNLayer(nn.Module):
             nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,gain=nn.init.calculate_gain('relu'))
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
@@ -224,25 +213,22 @@ class UnionRGCNLayer(nn.Module):
 
     def forward(self, g, prev_h, emb_rel):
         self.rel_emb = emb_rel
-        # self.sub = sub
-        # self.ob = ob
         if self.self_loop:
-            #loop_message = torch.mm(g.ndata['h'], self.loop_weight)
-            # masked_index = torch.masked_select(torch.arange(0, g.number_of_nodes(), dtype=torch.long), (g.in_degrees(range(g.number_of_nodes())) > 0))
+            # Node có cạnh vào dùng loop_weight; node cô lập dùng evolve_loop_weight
             masked_index = torch.masked_select(
                 torch.arange(0, g.number_of_nodes(), dtype=torch.long).cuda(),
                 (g.in_degrees(range(g.number_of_nodes())) > 0))
             loop_message = torch.mm(g.ndata['h'], self.evolve_loop_weight)
             loop_message[masked_index, :] = torch.mm(g.ndata['h'], self.loop_weight)[masked_index, :]
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
 
-        # calculate the neighbor message with weight_neighbor
+        # Lan truyền và gộp thông điệp từ lân cận
         self.propagate(g)
         node_repr = g.ndata['h']
 
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:  # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             if self.self_loop:
                 node_repr = node_repr + loop_message
             node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_h
@@ -258,23 +244,10 @@ class UnionRGCNLayer(nn.Module):
         return node_repr
 
     def msg_func(self, edges):
-        # if reverse:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_o']).view(-1, self.out_feat)
-        # else:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_s']).view(-1, self.out_feat)
+        # Thông điệp từ node nguồn: (embedding node + embedding quan hệ) qua phép chiếu tuyến tính
         relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
-        edge_type = edges.data['type']
-        edge_num = edge_type.shape[0]
         node = edges.src['h'].view(-1, self.out_feat)
-        # node = torch.cat([torch.matmul(node[:edge_num // 2, :], self.sub),
-        #                  torch.matmul(node[edge_num // 2:, :], self.ob)])
-        # node = torch.matmul(node, self.sub)
-
-        # after add inverse edges, we only use message pass when h as tail entity
-        # 这里计算的是每个节点发出的消息，节点发出消息时其作为头实体
-        # msg = torch.cat((node, relation), dim=1)
         msg = node + relation
-        # calculate the neighbor message with weight_neighbor
         msg = torch.mm(msg, self.weight_neighbor)
         return {'msg': msg}
 
@@ -298,7 +271,7 @@ class UnionRGCNLayer2(nn.Module):
         self.ob = None
         self.sub = None
 
-        # WL
+        # Trọng số chiếu thông điệp nhận từ lân cận
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
@@ -309,10 +282,10 @@ class UnionRGCNLayer2(nn.Module):
             nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,gain=nn.init.calculate_gain('relu'))
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
@@ -324,25 +297,22 @@ class UnionRGCNLayer2(nn.Module):
 
     def forward(self, g, prev_h, emb_rel):
         self.rel_emb = emb_rel
-        # self.sub = sub
-        # self.ob = ob
         if self.self_loop:
-            #loop_message = torch.mm(g.ndata['h'], self.loop_weight)
-            # masked_index = torch.masked_select(torch.arange(0, g.number_of_nodes(), dtype=torch.long), (g.in_degrees(range(g.number_of_nodes())) > 0))
+            # Node có cạnh vào dùng loop_weight; node cô lập dùng evolve_loop_weight
             masked_index = torch.masked_select(
                 torch.arange(0, g.number_of_nodes(), dtype=torch.long).cuda(),
                 (g.in_degrees(range(g.number_of_nodes())) > 0))
             loop_message = torch.mm(g.ndata['h'], self.evolve_loop_weight)
             loop_message[masked_index, :] = torch.mm(g.ndata['h'], self.loop_weight)[masked_index, :]
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
 
-        # calculate the neighbor message with weight_neighbor
+        # Lan truyền và gộp thông điệp từ lân cận
         self.propagate(g)
         node_repr = g.ndata['h']
 
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:  # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             if self.self_loop:
                 node_repr = node_repr + loop_message
             node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_h
@@ -358,23 +328,10 @@ class UnionRGCNLayer2(nn.Module):
         return node_repr
 
     def msg_func(self, edges):
-        # if reverse:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_o']).view(-1, self.out_feat)
-        # else:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_s']).view(-1, self.out_feat)
+        # Thông điệp từ node nguồn: (embedding node + embedding quan hệ) qua phép chiếu tuyến tính
         relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
-        edge_type = edges.data['type']
-        edge_num = edge_type.shape[0]
         node = edges.src['h'].view(-1, self.out_feat)
-        # node = torch.cat([torch.matmul(node[:edge_num // 2, :], self.sub),
-        #                  torch.matmul(node[edge_num // 2:, :], self.ob)])
-        # node = torch.matmul(node, self.sub)
-
-        # after add inverse edges, we only use message pass when h as tail entity
-        # 这里计算的是每个节点发出的消息，节点发出消息时其作为头实体
-        # msg = torch.cat((node, relation), dim=1)
         msg = node + relation
-        # calculate the neighbor message with weight_neighbor
         msg = torch.mm(msg, self.weight_neighbor)
         return {'msg': msg}
 
@@ -411,7 +368,6 @@ class RGAT(nn.Module):
         if self.layer_norm:
             self.normalization_layer = nn.LayerNorm(out_feat, elementwise_affine=False)
 
-        # self.num_rels = num_rels
         self.num_head = 5
         self.out_feat = out_feat
         self.in_feat = in_feat
@@ -432,16 +388,13 @@ class RGAT(nn.Module):
     def forward(self,g,node,rel):
         g.ndata['h'] = node
         g.edata['rel_emb'] = rel[g.edata['type']]
-        # g.edata['tim_emb'] = tim[g.edata['time']]
         if self.self_loop:
-            #print(self.loop_weight)
-            # loop_message = torch.mm(g.ndata['h'], self.loop_weight)
+            # Node có cạnh vào dùng loop_weight; node cô lập dùng evolve_loop_weight
             masked_index = torch.masked_select(
                 torch.arange(0, g.number_of_nodes(), dtype=torch.long).cuda(),
                 (g.in_degrees(range(g.number_of_nodes())) > 0))
             loop_message = torch.mm(g.ndata['h'], self.evolve_loop_weight)
             loop_message[masked_index, :] = torch.mm(g.ndata['h'], self.loop_weight)[masked_index, :]
-            # loop_message = g.ndata['h']
             if self.dropout is not None:
                 loop_message = self.dropout(loop_message)
         self.propagate(g)
@@ -449,104 +402,64 @@ class RGAT(nn.Module):
         if self.self_loop:
             node_repr = node_repr + loop_message
         g.ndata['h'] = node_repr
-        # quad_tim = torch.matmul(tim,self.W_t)
-        # quad_rel = torch.matmul(rel,self.W_r)
-
         return self.activation(node_repr)
 
     def forward_v(self,g,batchsize,node,rel,tim):
+        # Biến thể lan truyền trên toàn đồ thị, self-loop không qua phép chiếu
         g.ndata['h'] = node
         g.edata['rel_emb'] = rel[g.edata['type']]
-        # g.edata['tim_emb'] = tim[g.edata['time']]  # 这里可以保留或者放在外面，同时分block可以放在这里面
-        if self.self_loop:  # 这里是true
-            # print(self.loop_weight)
-            # loop_message = torch.mm(g.ndata['h'], self.loop_weight)
+        if self.self_loop:
             loop_message = g.ndata['h']
             if self.dropout is not None:
-                loop_message = self.dropout(loop_message)  # 一部分变成0，损失信息
-        # 修改思路：
-        # 主要是在消息传播的时候会超出内存，后面不会超出，在传播的前一步g分batch
-        # 在信息传播 处做修改
-        # 每一个batch计算出一部分嵌入，把所有的按照该有的顺序合成原有的size
-
-        # sampler =dgl.dataloading.MultiLayerFullNeighborSampler(1)
-        # sampler = dgl.dataloading.MultiLayerNeighborSampler([100])
-        # train_nids = np.random.choice(np.arange(g.num_nodes()), (g.num_nodes(),), replace=False)#这里是选取输出尾节点
-        # dataloader =dgl.dataloading.NodeDataLoader\
-        #     (g, train_nids, sampler, batch_size=batchsize, device=g.device)#一个block的output_nodes的数量是batch_size
-
-        # b = torch.zeros(g.ndata['h'].shape[0], g.ndata['h'].shape[1],device=g.device)
-        # count=0
-        # for input_nodes, output_nodes, blocks in dataloader:#
-        #     count=count+1
-        #     self.propagate(blocks[0])
-
-        # for input_nodes, output_nodes, blocks in dataloader:#
-        #     b[output_nodes,:] = blocks[0].dstdata['h']
-
-        self.propagate(g)  # 这里out of memory//信息传播
-        # node_repr = b
-        # if self.self_loop:
-        #     node_repr = node_repr + loop_message  # 两个信息相加（原信息和传播之后信息）
-        # g.ndata['h'] = node_repr  # 替换
-        # quad_rel = torch.matmul(rel, self.W_r)
+                loop_message = self.dropout(loop_message)
+        self.propagate(g)
         return self.activation(g.ndata['h'])
 
     def forward_v2(self,g,batchsize,node,rel,device):
+        # Biến thể chia node thành từng batch để lan truyền, tránh hết bộ nhớ trên đồ thị lớn
         g.ndata['h'] = node
-        # g.edata['rel_emb'] = rel[g.edata['type']]
-        # g.edata['tim_emb'] = tim[g.edata['time']]  # 这里可以保留或者放在外面，同时分block可以放在这里面
-        if self.self_loop:  # 这里是true
+        if self.self_loop:
             loop_message = node
             if self.dropout is not None:
-                loop_message = self.dropout(loop_message)  # 一部分变成0，损失信息
+                loop_message = self.dropout(loop_message)
 
         sampler =dgl.dataloading.MultiLayerFullNeighborSampler(1)
-        # sampler = dgl.dataloading.MultiLayerNeighborSampler([self.sample_num])
-        train_nids = np.random.choice(np.arange(g.num_nodes()), (g.num_nodes(),), replace=False)#这里是选取输出尾节点
+        train_nids = np.random.choice(np.arange(g.num_nodes()), (g.num_nodes(),), replace=False)
         dataloader =dgl.dataloading.DataLoader\
-            (g, train_nids, sampler, batch_size=batchsize, device=device)#一个block的output_nodes的数量是batch_size
+            (g, train_nids, sampler, batch_size=batchsize, device=device)
 
         b = torch.zeros(g.num_nodes(), self.in_feat).to(device)
 
-        for input_nodes, output_nodes, blocks in dataloader:#
+        for input_nodes, output_nodes, blocks in dataloader:
             blocks[0].edata['rel_emb'] = rel[blocks[0].edata['type']]
-            # blocks[0].edata['tim_emb'] = tim[blocks[0].edata['time']]
             self.propagate(blocks[0])
 
-        for input_nodes, output_nodes, blocks in dataloader:#
+        for input_nodes, output_nodes, blocks in dataloader:
             b[output_nodes,:] = blocks[0].dstdata['h']
 
         node_repr = b
         if self.self_loop:
-            node_repr = node_repr + loop_message  # 两个信息相加（原信息和传播之后信息）
-        g.ndata['h'] = node_repr  # 替换
-        # quad_rel = torch.matmul(rel, self.W_r)
+            node_repr = node_repr + loop_message
+        g.ndata['h'] = node_repr
         return self.activation(node_repr)
 
     def propagate(self, g):
-        #消息传递
+        # Tính điểm chú ý cho từng cạnh, chuẩn hoá bằng edge_softmax rồi gộp thông điệp
         g.apply_edges(func=self.quads_msg_func)
         g.edata['a_triplet'] = F.leaky_relu(g.edata['a_triplet'])
         g.edata['att_triplet'] = edge_softmax(g, g.edata['a_triplet'])
-        # g.edata['a_quad'] = F.leaky_relu(g.edata['quad'])
-        # g.edata['att_quad'] = edge_softmax(g, g.edata['a_quad'])
-        # g.update_all(self.msg_func, fn.sum(msg='msg', out='h'))
         g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
 
 
     def quads_msg_func(self, edges):
-        # triplet = edges.src['h']+edges.dst['h']+edges.data['rel_emb']
+        # Biểu diễn cạnh từ [nguồn ; quan hệ ; đích]; điểm chú ý có cộng thêm tần suất triple
         triplet = torch.cat([edges.src['h'],edges.data['rel_emb'],edges.dst['h']],dim=1)
         triplet = torch.mm(triplet, self.w_triplet)
-        # quad = torch.mm(torch.cat([triplet,edges.data['tim_emb']],dim=1),self.w_quad)
         sro_fre=edges.data['fre'].unsqueeze(1)
         a_triplet =  torch.mm(triplet+sro_fre,self.w_quad)
-        # a_quad =  triplet
         return {'triplet':triplet,'a_triplet':a_triplet}
 
     def msg_func(self, edges):
-        # att_n = edges.data['att_triplet']*edges.data['att_quad']
         return {'msg': (edges.data['att_triplet'] * edges.data['triplet'])}
         
     def apply_func(self, nodes):
@@ -569,7 +482,7 @@ class UnionRGATLayer(nn.Module):
         self.ob = None
         self.sub = None
 
-        # WL
+        # Trọng số chiếu thông điệp nhận từ lân cận
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
@@ -580,24 +493,23 @@ class UnionRGATLayer(nn.Module):
             nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,gain=nn.init.calculate_gain('relu'))
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
         else:
             self.dropout = None
 
-        # equation (2)
-        self.attn_fc = nn.Linear(3 * self.out_feat, self.out_feat, bias=False)  
-        self.attn_fc2 = nn.Linear(self.out_feat, 1, bias=False)  
-        # self.leakyrelu = nn.LeakyReLU(0.1)
-        nn.init.xavier_normal_(self.attn_fc.weight, gain=nn.init.calculate_gain('relu'))  
+        # Hai lớp tuyến tính tính hệ số chú ý từ [node nguồn ; node đích ; quan hệ]
+        self.attn_fc = nn.Linear(3 * self.out_feat, self.out_feat, bias=False)
+        self.attn_fc2 = nn.Linear(self.out_feat, 1, bias=False)
+        nn.init.xavier_normal_(self.attn_fc.weight, gain=nn.init.calculate_gain('relu'))
 
     def edge_attention(self, edges):
-            # edge UDF for equation (2)
+        # Hệ số chú ý của cạnh tính từ [node nguồn ; node đích ; quan hệ]
         relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
         node_h = edges.src['h'].view(-1, self.out_feat)
         node_t = edges.dst['h'].view(-1, self.out_feat)  
@@ -608,60 +520,34 @@ class UnionRGATLayer(nn.Module):
         return {'e_att': F.leaky_relu(a)}
 
     def propagate(self, g):
-        # g.update_all(lambda x: self.msg_func(x), fn.sum(msg='msg', out='h'), self.apply_func)
         g.update_all(self.msg_func, self.reduce_func)
 
     def msg_func(self, edges):
-            # if reverse:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_o']).view(-1, self.out_feat)
-        # else:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_s']).view(-1, self.out_feat)
-        relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
-        edge_type = edges.data['type']
-        edge_num = edge_type.shape[0]
-        node = edges.src['h'].view(-1, self.out_feat)
-        node_t = edges.dst['h'].view(-1, self.out_feat)
-        # node = torch.cat([torch.matmul(node[:edge_num // 2, :], self.sub),
-        #                  torch.matmul(node[edge_num // 2:, :], self.ob)])
-        # node = torch.matmul(node, self.sub)
-
-        # after add inverse edges, we only use message pass when h as tail entity
-        # 这里计算的是每个节点发出的消息，节点发出消息时其作为头实体
-        msg = torch.cat([node, node_t, relation], dim=1)
-        msg = self.attn_fc(msg)
-        # msg = node + relation
-        # calculate the neighbor message with weight_neighbor
-        # msg = torch.mm(msg, self.weight_neighbor)
-        # return {'msg': msg}
+        # Gửi embedding node nguồn kèm hệ số chú ý đã tính ở edge_attention
         return {'e_h': edges.src['h'], 'e_att': edges.data['e_att']}
 
     def reduce_func(self, nodes):
-            # reduce UDF for equation (3) & (4)
-        # equation (3)
+        # Chuẩn hoá hệ số chú ý rồi lấy tổng có trọng số các thông điệp đến
         alpha = F.softmax(nodes.mailbox['e_att'], dim=1)
-        # print(alpha)
-        # equation (4)
         h = torch.sum(alpha * nodes.mailbox['e_h'], dim=1)
         return {'h': h}
 
 
     def forward(self, g, prev_h, emb_rel):
         self.rel_emb = emb_rel
-        # self.sub = sub
-        # self.ob = ob
         if self.self_loop:
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
         
-        g.apply_edges(self.edge_attention) #获取注意力机制
+        g.apply_edges(self.edge_attention)  # tính hệ số chú ý trên từng cạnh
 
-        # calculate the neighbor message with weight_neighbor
+        # Lan truyền và gộp thông điệp từ lân cận
         self.propagate(g)
         node_repr = g.ndata['h']
 
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:  # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             if self.self_loop:
                 node_repr = node_repr + loop_message
             node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_h
@@ -693,7 +579,7 @@ class CompGCNLayer(nn.Module):
         self.sub = None
         self.comp = comp
 
-        # WL
+        # Trọng số chiếu thông điệp nhận từ lân cận
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
@@ -704,10 +590,10 @@ class CompGCNLayer(nn.Module):
             nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,gain=nn.init.calculate_gain('relu'))
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
@@ -719,25 +605,17 @@ class CompGCNLayer(nn.Module):
 
     def forward(self, g, prev_h, emb_rel):
         self.rel_emb = emb_rel
-        # self.sub = sub
-        # self.ob = ob
         if self.self_loop:
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
-            # masked_index = torch.masked_select(torch.arange(0, g.number_of_nodes(), dtype=torch.long), (g.in_degrees(range(g.number_of_nodes())) > 0))
-            # masked_index = torch.masked_select(
-            #     torch.arange(0, g.number_of_nodes(), dtype=torch.long).cuda(),
-            #     (g.in_degrees(range(g.number_of_nodes())) > 0))
-            # loop_message = torch.mm(g.ndata['h'], self.evolve_loop_weight)
-            # loop_message[masked_index, :] = torch.mm(g.ndata['h'], self.loop_weight)[masked_index, :]
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
 
-        # calculate the neighbor message with weight_neighbor
+        # Lan truyền và gộp thông điệp từ lân cận
         self.propagate(g)
         node_repr = g.ndata['h']
 
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:  # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             if self.self_loop:
                 node_repr = node_repr + loop_message
             node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_h
@@ -753,35 +631,13 @@ class CompGCNLayer(nn.Module):
         return node_repr
 
     def msg_func(self, edges):
-        # if reverse:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_o']).view(-1, self.out_feat)
-        # else:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_s']).view(-1, self.out_feat)
+        # Kết hợp embedding node nguồn với embedding quan hệ theo toán tử comp (sub/mult)
         relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
-        edge_type = edges.data['type']
-        edge_num = edge_type.shape[0]
         node = edges.src['h'].view(-1, self.out_feat)
-        # node = torch.cat([torch.matmul(node[:edge_num // 2, :], self.sub),
-        #                  torch.matmul(node[edge_num // 2:, :], self.ob)])
-        # node = torch.matmul(node, self.sub)
-
-        # after add inverse edges, we only use message pass when h as tail entity
-        # 这里计算的是每个节点发出的消息，节点发出消息时其作为头实体
-        # msg = torch.cat((node, relation), dim=1)
-        # print(self.comp)
         if self.comp == "sub":
             msg = node + relation
         elif self.comp == "mult":
             msg = node * relation
-        # elif self.comp == "corr":
-            # a = torch.fft.ifft(node)
-            # b = torch.fft.ifft(relation)
-            # print(com_mult(conj(torch.fft.ifft(node, 1)), torch.fft.ifft(relation, 1)).size())
-            # print(a.size(), b.size())
-            # print(conj(a))
-            # msg = torch.fft.irfft(com_mult(conj(torch.fft.ifft(node)), torch.fft.ifft(relation)), 1) #signal_sizes=(node.shape[-1],))
-        # calculate the neighbor message with weight_neighbor
-        # print(msg.size())
         msg = torch.mm(msg, self.weight_neighbor)
         return {'msg': msg}
 
@@ -804,7 +660,7 @@ class UnionRGATLayer2(nn.Module):
         self.ob = None
         self.sub = None
 
-        # WL
+        # Trọng số chiếu thông điệp nhận từ lân cận
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
@@ -815,24 +671,23 @@ class UnionRGATLayer2(nn.Module):
             nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,gain=nn.init.calculate_gain('relu'))
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
         else:
             self.dropout = None
 
-        # equation (2)
-        self.attn_fc = nn.Linear(3 * self.out_feat, self.out_feat, bias=False)  
-        self.attn_fc2 = nn.Linear(self.out_feat, 1, bias=False)  
-        # self.leakyrelu = nn.LeakyReLU(0.1)
-        nn.init.xavier_normal_(self.attn_fc.weight, gain=nn.init.calculate_gain('relu'))  
+        # Hai lớp tuyến tính tính hệ số chú ý từ [node nguồn ; node đích ; quan hệ]
+        self.attn_fc = nn.Linear(3 * self.out_feat, self.out_feat, bias=False)
+        self.attn_fc2 = nn.Linear(self.out_feat, 1, bias=False)
+        nn.init.xavier_normal_(self.attn_fc.weight, gain=nn.init.calculate_gain('relu'))
 
     def edge_attention(self, edges):
-            # edge UDF for equation (2)
+        # Hệ số chú ý của cạnh tính từ [node nguồn ; node đích ; quan hệ]
         relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
         node_h = edges.src['h'].view(-1, self.out_feat)
         node_t = edges.dst['h'].view(-1, self.out_feat)  
@@ -843,60 +698,34 @@ class UnionRGATLayer2(nn.Module):
         return {'e_att': F.leaky_relu(a)}
 
     def propagate(self, g):
-        # g.update_all(lambda x: self.msg_func(x), fn.sum(msg='msg', out='h'), self.apply_func)
         g.update_all(self.msg_func, self.reduce_func)
 
     def msg_func(self, edges):
-            # if reverse:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_o']).view(-1, self.out_feat)
-        # else:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_s']).view(-1, self.out_feat)
-        relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
-        edge_type = edges.data['type']
-        edge_num = edge_type.shape[0]
-        node = edges.src['h'].view(-1, self.out_feat)
-        node_t = edges.dst['h'].view(-1, self.out_feat)
-        # node = torch.cat([torch.matmul(node[:edge_num // 2, :], self.sub),
-        #                  torch.matmul(node[edge_num // 2:, :], self.ob)])
-        # node = torch.matmul(node, self.sub)
-
-        # after add inverse edges, we only use message pass when h as tail entity
-        # 这里计算的是每个节点发出的消息，节点发出消息时其作为头实体
-        msg = torch.cat([node, node_t, relation], dim=1)
-        msg = self.attn_fc(msg)
-        # msg = node + relation
-        # calculate the neighbor message with weight_neighbor
-        # msg = torch.mm(msg, self.weight_neighbor)
-        # return {'msg': msg}
+        # Gửi embedding node nguồn kèm hệ số chú ý đã tính ở edge_attention
         return {'e_h': edges.src['h'], 'e_att': edges.data['e_att']}
 
     def reduce_func(self, nodes):
-            # reduce UDF for equation (3) & (4)
-        # equation (3)
+        # Chuẩn hoá hệ số chú ý rồi lấy tổng có trọng số các thông điệp đến
         alpha = F.softmax(nodes.mailbox['e_att'], dim=1)
-        # print(alpha)
-        # equation (4)
         h = torch.sum(alpha * nodes.mailbox['e_h'], dim=1)
         return {'h': h}
 
 
     def forward(self, g, prev_h, emb_rel):
         self.rel_emb = emb_rel
-        # self.sub = sub
-        # self.ob = ob
         if self.self_loop:
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
         
-        g.apply_edges(self.edge_attention) #获取注意力机制
+        g.apply_edges(self.edge_attention)  # tính hệ số chú ý trên từng cạnh
 
-        # calculate the neighbor message with weight_neighbor
+        # Lan truyền và gộp thông điệp từ lân cận
         self.propagate(g)
         node_repr = g.ndata['h']
 
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:  # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             if self.self_loop:
                 node_repr = node_repr + loop_message
             node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_h
@@ -928,7 +757,7 @@ class CompGCNLayer2(nn.Module):
         self.sub = None
         self.comp = comp
 
-        # WL
+        # Trọng số chiếu thông điệp nhận từ lân cận
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
@@ -939,10 +768,10 @@ class CompGCNLayer2(nn.Module):
             nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
         if self.skip_connect:
-            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))   # 和self-loop不一样，是跨层的计算
+            self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  # trọng số skip-connect nối biểu diễn của lớp trước sang lớp sau
             nn.init.xavier_uniform_(self.skip_connect_weight,gain=nn.init.calculate_gain('relu'))
             self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.zeros_(self.skip_connect_bias)  # 初始化设置为0
+            nn.init.zeros_(self.skip_connect_bias)
 
         if dropout:
             self.dropout = nn.Dropout(dropout)
@@ -954,25 +783,17 @@ class CompGCNLayer2(nn.Module):
 
     def forward(self, g, prev_h, emb_rel):
         self.rel_emb = emb_rel
-        # self.sub = sub
-        # self.ob = ob
         if self.self_loop:
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
-            # masked_index = torch.masked_select(torch.arange(0, g.number_of_nodes(), dtype=torch.long), (g.in_degrees(range(g.number_of_nodes())) > 0))
-            # masked_index = torch.masked_select(
-            #     torch.arange(0, g.number_of_nodes(), dtype=torch.long).cuda(),
-            #     (g.in_degrees(range(g.number_of_nodes())) > 0))
-            # loop_message = torch.mm(g.ndata['h'], self.evolve_loop_weight)
-            # loop_message[masked_index, :] = torch.mm(g.ndata['h'], self.loop_weight)[masked_index, :]
         if len(prev_h) != 0 and self.skip_connect:
-            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)     # 使用sigmoid，让值在0~1
+            skip_weight = F.sigmoid(torch.mm(prev_h, self.skip_connect_weight) + self.skip_connect_bias)  # sigmoid đưa trọng số skip về (0, 1)
 
-        # calculate the neighbor message with weight_neighbor
+        # Lan truyền và gộp thông điệp từ lân cận
         self.propagate(g)
         node_repr = g.ndata['h']
 
-        # print(len(prev_h))
-        if len(prev_h) != 0 and self.skip_connect:  # 两次计算loop_message的方式不一样，前者激活后再加权
+        # Có skip-connect: trộn biểu diễn mới với biểu diễn lớp trước theo trọng số học được
+        if len(prev_h) != 0 and self.skip_connect:
             if self.self_loop:
                 node_repr = node_repr + loop_message
             node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_h
@@ -988,35 +809,13 @@ class CompGCNLayer2(nn.Module):
         return node_repr
 
     def msg_func(self, edges):
-        # if reverse:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_o']).view(-1, self.out_feat)
-        # else:
-        #     relation = self.rel_emb.index_select(0, edges.data['type_s']).view(-1, self.out_feat)
+        # Kết hợp embedding node nguồn với embedding quan hệ theo toán tử comp (sub/mult)
         relation = self.rel_emb.index_select(0, edges.data['type']).view(-1, self.out_feat)
-        edge_type = edges.data['type']
-        edge_num = edge_type.shape[0]
         node = edges.src['h'].view(-1, self.out_feat)
-        # node = torch.cat([torch.matmul(node[:edge_num // 2, :], self.sub),
-        #                  torch.matmul(node[edge_num // 2:, :], self.ob)])
-        # node = torch.matmul(node, self.sub)
-
-        # after add inverse edges, we only use message pass when h as tail entity
-        # 这里计算的是每个节点发出的消息，节点发出消息时其作为头实体
-        # msg = torch.cat((node, relation), dim=1)
-        # print(self.comp)
         if self.comp == "sub":
             msg = node + relation
         elif self.comp == "mult":
             msg = node * relation
-        # elif self.comp == "corr":
-            # a = torch.fft.ifft(node)
-            # b = torch.fft.ifft(relation)
-            # print(com_mult(conj(torch.fft.ifft(node, 1)), torch.fft.ifft(relation, 1)).size())
-            # print(a.size(), b.size())
-            # print(conj(a))
-            # msg = torch.fft.irfft(com_mult(conj(torch.fft.ifft(node)), torch.fft.ifft(relation)), 1) #signal_sizes=(node.shape[-1],))
-        # calculate the neighbor message with weight_neighbor
-        # print(msg.size())
         msg = torch.mm(msg, self.weight_neighbor)
         return {'msg': msg}
 

@@ -1,15 +1,11 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-import numpy as np
 
-# from rgcn.layers import RGCNBlockLayer as RGCNLayer
 from rgcn.layers import UnionRGCNLayer, RGCNBlockLayer, RGAT, UnionRGCNLayer2, UnionRGATLayer, CompGCNLayer
 from src.model import BaseRGCN
 from src.decoder import ConvTransE, ConvTransR
-from collections import defaultdict
 
 class MLPLinear(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -62,7 +58,6 @@ class RGCNCell(BaseRGCN):
             return g.ndata.pop('h')
         else:
             if self.features is not None:
-                print("----------------Feature is not None, Attention ------------")
                 g.ndata['id'] = self.features
             node_id = g.ndata['id'].squeeze()
             g.ndata['h'] = init_ent_emb[node_id]
@@ -103,7 +98,6 @@ class RGCNCell2(BaseRGCN):
             return g.ndata.pop('h')
         else:
             if self.features is not None:
-                print("----------------Feature is not None, Attention ------------")
                 g.ndata['id'] = self.features
             node_id = g.ndata['id'].squeeze()
             g.ndata['h'] = init_ent_emb[node_id]
@@ -115,8 +109,6 @@ class RGCNCell2(BaseRGCN):
                 for layer in self.layers:
                     layer(g, [])
             return g.ndata.pop('h')
-
-
 
 
 class RecurrentRGCN(nn.Module):
@@ -180,7 +172,9 @@ class RecurrentRGCN(nn.Module):
         self.emb_rel = torch.nn.Parameter(torch.Tensor(self.num_rels * 2, self.h_dim), requires_grad=True).float()
         torch.nn.init.xavier_normal_(self.emb_rel)
 
-        # ---------------- Path head: optional parameters ----------------
+        # Path head (bật bằng --use-path): chấm điểm ứng viên bằng lan truyền
+        # thông điệp 2 bước trên đồ thị lịch sử, rồi cộng vào logits của LogCL
+        # với hệ số học được gamma (khởi tạo 0 nên không ảnh hưởng lúc đầu).
         self.path_level = path_level
         if self.use_path:
             if path_dim <= 0 or path_layers <= 0 or path_batch_size <= 0:
@@ -198,10 +192,10 @@ class RecurrentRGCN(nn.Module):
             ])
             self.path_out = nn.Linear(self.path_dim, 1)
             self.path_gamma = nn.Parameter(torch.zeros(1))
-            # Muc 2 (hop nhat sau): cham diem path bang query [h_s ; hr_r] cua LogCL.
+            # Mức 2: chấm điểm path theo truy vấn [h_s ; hr_r] đã tiến hoá của LogCL
             if self.path_level >= 2:
                 self.path_q = nn.Linear(self.h_dim * 2, self.path_dim)
-            print("[path] head ON | dim=%d L=%d level=%d" % (self.path_dim, self.path_L, self.path_level))
+            print("[path] enabled: dim=%d, layers=%d, level=%d" % (self.path_dim, self.path_L, self.path_level))
 
         self.dynamic_emb = torch.nn.Parameter(torch.Tensor(num_ents, h_dim), requires_grad=True).float()
         torch.nn.init.normal_(self.dynamic_emb)
@@ -256,25 +250,21 @@ class RecurrentRGCN(nn.Module):
         self.time_gate_bias = nn.Parameter(torch.Tensor(h_dim))
         nn.init.zeros_(self.time_gate_bias)   
 
-        self.pre_gate_weight = nn.Parameter(torch.Tensor(h_dim, h_dim))    
+        self.pre_gate_weight = nn.Parameter(torch.Tensor(h_dim, h_dim))
         nn.init.xavier_uniform_(self.pre_gate_weight, gain=nn.init.calculate_gain('relu'))
-        # self.pre_gate_weight = nn.Parameter(torch.Tensor(h_dim))
-        # nn.init.xavier_uniform_(self.pre_gate_weight, gain=nn.init.calculate_gain('relu'))                      
 
-        # GRU cell for relation evolving
+        # GRU tiến hoá embedding thực thể/quan hệ qua các snapshot
         self.entity_cell = nn.GRUCell(self.h_dim, self.h_dim)
         self.relation_cell = nn.GRUCell(self.h_dim, self.h_dim)
 
-        # decoder
         if decoder_name == "convtranse":
             self.decoder_ob = ConvTransE(num_ents, h_dim, input_dropout, hidden_dropout, feat_dropout)
-            # self.decoder_ob1 = ConvTransE(num_ents, h_dim, input_dropout, hidden_dropout, feat_dropout)
             self.rdecoder = ConvTransR(num_rels, h_dim, input_dropout, hidden_dropout, feat_dropout)
         else:
-            raise NotImplementedError 
+            raise NotImplementedError
 
-    # ---------------- Path head: message passing and scoring ----------------
     def _merge_path_edges(self, history_graphs, device):
+        """Gộp cạnh của mọi đồ thị lịch sử thành một danh sách (src, dst, rel) chung."""
         edge_parts = []
         for graph in history_graphs:
             src, dst = graph.edges()
@@ -296,11 +286,14 @@ class RecurrentRGCN(nn.Module):
 
     def path_head_scores(self, queries, history_graphs, relation_embedding=None,
                          merged_edges=None, ent_emb=None):
-        """Return two-hop path scores for every candidate entity.
+        """Tính điểm path 2 bước cho mọi thực thể ứng viên của từng truy vấn.
 
-        Muc 2 (hop nhat sau): truyen relation_embedding = quan he DA tien hoa (hr)
-        va ent_emb = thuc the DA tien hoa (h); diem = path_q([h_s ; hr_r]) . H.
-        Muc 1: relation_embedding = emb_rel tinh, ent_emb=None, diem = path_out(H).
+        Khởi tạo biểu diễn tại thực thể nguồn từ embedding quan hệ truy vấn,
+        rồi lan truyền path_L vòng trên đồ thị lịch sử đã gộp cạnh.
+        - Mức 1: relation_embedding = emb_rel tĩnh, ent_emb = None,
+          điểm = path_out(H).
+        - Mức 2: truyền quan hệ (hr) và thực thể (h) đã tiến hoá,
+          điểm = path_q([h_s ; hr_r]) · H (chấm điểm có điều kiện theo truy vấn).
         """
         relation_embedding = self.emb_rel if relation_embedding is None else relation_embedding
         device = relation_embedding.device
@@ -339,14 +332,14 @@ class RecurrentRGCN(nn.Module):
                 hidden.view(-1, self.path_dim), 0, source_index, boundary
             ).view(batch_size, self.num_ents, self.path_dim)
 
-        # Muc 2: cham diem theo query [h_s ; hr_r] (thay path_out rieng cua Muc 1)
+        # Mức 2: chấm điểm theo truy vấn [h_s ; hr_r] thay cho path_out của mức 1
         if self.path_level >= 2 and ent_emb is not None:
             q_path = self.path_q(torch.cat([ent_emb[source], relation[queries[:, 1]]], dim=-1))
             return torch.einsum('bp,bnp->bn', q_path, hidden)
         return self.path_out(hidden).squeeze(-1)
 
-    # ---------------- Path head: fusion with LogCL logits ----------------
     def _fuse_path(self, logcl_score, queries, history_graphs, ent_emb=None, rel_emb=None):
+        """Chuẩn hoá điểm path rồi cộng vào logits LogCL với hệ số học được gamma."""
         if not self.use_path or not history_graphs:
             return logcl_score
 
@@ -354,7 +347,7 @@ class RecurrentRGCN(nn.Module):
         if merged_edges[0].numel() == 0:
             return logcl_score
 
-        # Muc 2: path doc quan he/thuc the DA tien hoa; Muc 1: emb_rel tinh, khong ent_emb.
+        # Mức 2 đọc quan hệ/thực thể đã tiến hoá; mức 1 dùng emb_rel tĩnh, không cần ent_emb
         if self.path_level >= 2:
             relation_embedding = rel_emb if rel_emb is not None else self.emb_rel
             entity_embedding = ent_emb
@@ -368,6 +361,7 @@ class RecurrentRGCN(nn.Module):
                 entity_embedding,
             )
 
+        # Chia truy vấn thành từng khối nhỏ + gradient checkpointing để tiết kiệm bộ nhớ GPU
         path_chunks = []
         for query_chunk in queries.split(self.path_batch_size, dim=0):
             if self.training and torch.is_grad_enabled():
@@ -385,8 +379,9 @@ class RecurrentRGCN(nn.Module):
     def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph, use_cuda):
 
         if self.use_static:
+            # Ràng buộc tĩnh: embedding thực thể và embedding từ cùng đi qua RGCN trên đồ thị tĩnh
             static_graph = static_graph.to(self.gpu)
-            static_graph.ndata['h'] = torch.cat((self.dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
+            static_graph.ndata['h'] = torch.cat((self.dynamic_emb, self.words_emb), dim=0)
             self.statci_rgcn_layer(static_graph, [])
             static_emb = static_graph.ndata.pop('h')[:self.num_ents, :]
             static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
@@ -395,7 +390,8 @@ class RecurrentRGCN(nn.Module):
             self.h = F.normalize(self.dynamic_emb) if self.layer_norm else self.dynamic_emb[:, :]
             static_emb = None
 
-        #-----------------全局历史建模-------------------------------------
+        # Biểu diễn lịch sử toàn cục: chạy GCN trên đồ thị con lịch sử đã lấy mẫu,
+        # rồi nhấn mạnh các thực thể liên quan truy vấn bằng attention theo query_mask
         self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)
         his_r_emb = F.normalize(self.emb_rel)
         his_att = F.softmax(self.w5(query_mask+ self.his_ent),dim=1)
@@ -407,11 +403,14 @@ class RecurrentRGCN(nn.Module):
         his_temp_embs =[]
         his_rel_embs =[]
         if self.pre_type=="all":
+            # Tiến hoá embedding qua từng snapshot lịch sử (cũ -> mới)
             for i, g in enumerate(g_list):
                 g = g.to(self.gpu)
+                # Mã hoá khoảng cách thời gian tới snapshot đích rồi trộn vào embedding thực thể
                 t2 = len(g_list)-i+1
                 h_t = torch.cos(self.weight_t2 * t2 + self.bias_t2).repeat(self.num_ents,1)
                 self.h =self.w4(torch.concat([self.h,h_t],dim=1))
+                # Embedding quan hệ tại snapshot: trung bình embedding các thực thể kề quan hệ đó
                 temp_e = self.h[g.r_to_e]
                 x_input = torch.zeros(self.num_rels * 2, self.h_dim).float().cuda() if use_cuda else torch.zeros(self.num_rels * 2, self.h_dim).float()
                 for span, r_idx in zip(g.r_len, g.uniq_r):
@@ -421,19 +420,16 @@ class RecurrentRGCN(nn.Module):
                 x_input = self.emb_rel + x_input
                 current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel])
                 current_h = F.normalize(current_h) if self.layer_norm else current_h
-                # current_h1 = F.sigmoid(self.w6(current_h))   # 让相应的维度大小早）0~1之间，通过mask矩阵获取query time 出现的实体，其他实体设置为0
                 att_e = F.softmax(self.w2(query_mask+current_h),dim=1)
-                
+
+                # GRU cập nhật trạng thái thực thể; trạng thái ra là đầu vào của snapshot kế tiếp
                 if i == 0:
-                    self.h_0 = self.entity_cell(current_h, self.h)    # 第1层输入
+                    self.h_0 = self.entity_cell(current_h, self.h)
                     self.h_0 = F.normalize(self.h_0) if self.layer_norm else self.h_0
-                    # self.hr = self.relation_cell(x_input, self.emb_rel)    # 第1层输入
-                    # self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
                 else:
-                    self.h_0 = self.entity_cell(current_h, self.h_0)  # 第2层输出==下一时刻第一层输入
+                    self.h_0 = self.entity_cell(current_h, self.h_0)
                     self.h_0 = F.normalize(self.h_0) if self.layer_norm else self.h_0
-                    # self.hr = self.relation_cell(x_input, self.hr)  # 第2层输出==下一时刻第一层输入
-                    # self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
+                # Cổng thời gian trộn embedding quan hệ theo snapshot với embedding quan hệ tĩnh
                 time_weight = F.sigmoid(torch.mm(x_input, self.time_gate_weight) + self.time_gate_bias)
                 self.hr = time_weight * x_input + (1-time_weight) * self.emb_rel
                 self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
@@ -457,8 +453,9 @@ class RecurrentRGCN(nn.Module):
     def predict(self,que_pair, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda):
         with torch.no_grad():
             all_triples = test_triplets
-            
-            #-----------------查询数据处理-------------------------------------
+
+            # Dựng query_mask: mỗi thực thể truy vấn mang biểu diễn [embedding thực thể ;
+            # trung bình embedding các quan hệ nó tham gia], các thực thể khác bằng 0
             uniq_e = que_pair[0]
             r_len = que_pair[1]
             r_idx = que_pair[2]
@@ -471,16 +468,15 @@ class RecurrentRGCN(nn.Module):
 
             query_mask = torch.zeros((self.num_ents,self.h_dim)).to(self.gpu) if use_cuda else torch.zeros(1)
             e1_emb = self.dynamic_emb[uniq_e]
-            rel_emb = e_input[uniq_e] #实体所连的所有关系池化
+            rel_emb = e_input[uniq_e]
             query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
             query_mask[uniq_e] = query_emb
 
             embedding, _, r_emb, his_emb, his_r_emb,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, use_cuda)
 
             if self.pre_type == "all":
-
                 scores_ob,_= self.decoder_ob.forward( embedding,r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
-                # Path head fusion must happen before softmax.
+                # Cộng điểm path vào logits trước khi softmax
                 scores_ob = self._fuse_path(scores_ob, all_triples, test_graph, embedding, r_emb)
                 score_seq = F.softmax(scores_ob, dim=1)
                 score_en =score_seq
@@ -489,21 +485,15 @@ class RecurrentRGCN(nn.Module):
 
 
     def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, use_cuda):
-        """
-        :param glist:
-        :param triplets:
-        :param static_graph: 
-        :param use_cuda:
-        :return:
-        """
+        """Tính các thành phần loss cho một snapshot: (loss_ent, loss_rel, loss_static, loss_cl)."""
         loss_ent = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_cl = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_rel = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_static = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
-        
+
         all_triples = triples
 
-        ### --------------查询数据处理-----------------------
+        # Dựng query_mask như trong predict, nhưng embedding thực thể có thêm mã hoá thời gian
         uniq_e = que_pair[0]
         r_len = que_pair[1]
         r_idx = que_pair[2]
@@ -527,11 +517,9 @@ class RecurrentRGCN(nn.Module):
 
         embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, use_cuda)
 
-
-
         if self.pre_type == "all":
             scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples, his_emb,self.pre_weight, self.pre_type)
-            # Path head fusion must happen before softmax.
+            # Cộng điểm path vào logits trước khi softmax
             scores_ob = self._fuse_path(scores_ob, all_triples, glist, embedding, r_emb)
             score_seq = F.softmax(scores_ob, dim=1)
             score_en = score_seq
@@ -543,6 +531,8 @@ class RecurrentRGCN(nn.Module):
             score_rel = self.rdecoder.forward(embedding,r_emb, all_triples, mode="train").view(-1, 2 * self.num_rels)
             loss_rel += self.loss_r(score_rel, all_triples[:, 1])
         
+        # Học tương phản: kéo biểu diễn truy vấn từ lịch sử toàn cục và từ chuỗi
+        # tiến hoá cục bộ (từng snapshot) lại gần nhau
         if self.use_cl and self.pre_type=="all":
             for id, evolve_emb in enumerate(his_temp_embs):
                 t3 = len(his_temp_embs)-id+1
@@ -555,6 +545,7 @@ class RecurrentRGCN(nn.Module):
         return loss_ent, loss_rel, loss_static, loss_cl
 
     def all_GCN(self,ent_emb, sub_graph, use_cuda):
+        """Mã hoá đồ thị con lịch sử toàn cục; trả về (embedding chuẩn hoá, chỉ số node có cạnh vào)."""
         sub_graph = sub_graph.to(self.gpu)
         sub_graph.ndata['h'] = ent_emb 
         his_emb = self.his_rgcn_layer.forward(sub_graph, ent_emb, [self.emb_rel, self.emb_rel])
@@ -564,7 +555,10 @@ class RecurrentRGCN(nn.Module):
         return F.normalize(his_emb),subg_index
     
     def get_loss_conv(self, ent1_emb, ent2_emb):
+        """Loss tương phản kiểu InfoNCE: cặp cùng chỉ số là dương, khác chỉ số là âm.
 
+        Lấy trung bình trên cả bốn ma trận tương đồng (z1·z2, z2·z1, z1·z1, z2·z2).
+        """
         loss_fn = nn.CrossEntropyLoss().to(self.gpu)
         z1 = self.projection_model(ent1_emb)
         z2 = self.projection_model(ent2_emb)
@@ -573,6 +567,5 @@ class RecurrentRGCN(nn.Module):
         pred3 = torch.mm(z1, z1.T)
         pred4 = torch.mm(z2, z2.T)
         labels = torch.arange(pred1.shape[0]).to(self.gpu)
-        # train_cl_loss =(loss_fn(pred1 / self.temp, labels) + loss_fn(pred2 / self.temp, labels)) / 2
         train_cl_loss =(loss_fn(pred1 / self.temp, labels) + loss_fn(pred2 / self.temp, labels)+loss_fn(pred3 / self.temp, labels) + loss_fn(pred4 / self.temp, labels)) / 4
         return train_cl_loss

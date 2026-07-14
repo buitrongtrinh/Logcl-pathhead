@@ -25,7 +25,7 @@ def sort_and_rank(score, target):
     return indices
 
 
-#TODO filer by groud truth in the same time snapshot not all ground truth
+# TODO: lọc theo ground truth trong cùng snapshot thay vì toàn bộ ground truth
 def sort_and_rank_time_filter(batch_a, batch_r, score, target, total_triplets):
     _, indices = torch.sort(score, dim=1, descending=True)
     indices = torch.nonzero(indices == target.view(-1, 1))
@@ -42,8 +42,9 @@ def sort_and_rank_filter(batch_a, batch_r, score, target, all_ans):
         ground = score[i][ans]
         score[i][b_multi] = 0
         score[i][ans] = ground
-    _, indices = torch.sort(score, dim=1, descending=True)  # indices : [B, number entity]
-    indices = torch.nonzero(indices == target.view(-1, 1))  # indices : [B, 2] 第一列递增， 第二列表示对应的答案实体id在每一行的位置
+    _, indices = torch.sort(score, dim=1, descending=True)  # [B, num_entities]
+    # [B, 2]: cột 0 là chỉ số dòng, cột 1 là vị trí (rank) của thực thể đáp án trong dòng đó
+    indices = torch.nonzero(indices == target.view(-1, 1))
     indices = indices[:, 1].view(-1)
     return indices
 
@@ -54,10 +55,11 @@ def filter_score(test_triples, score, all_ans):
     test_triples = test_triples.cpu()
     for _, triple in enumerate(test_triples):
         h, r, t = triple
+        # Chặn điểm của các đáp án đúng khác, chỉ giữ lại thực thể đích đang xét
         ans = list(all_ans[h.item()][r.item()])
         ans.remove(t.item())
         ans = torch.LongTensor(ans)
-        score[_][ans] = -10000000  #
+        score[_][ans] = -10000000
     return score
 
 def filter_score_r(test_triples, score, all_ans):
@@ -66,21 +68,19 @@ def filter_score_r(test_triples, score, all_ans):
     test_triples = test_triples.cpu()
     for _, triple in enumerate(test_triples):
         h, r, t = triple
+        # Chặn điểm của các quan hệ đúng khác, chỉ giữ lại quan hệ đang xét
         ans = list(all_ans[h.item()][t.item()])
-        # print(h, r, t)
-        # print(ans)
         ans.remove(r.item())
         ans = torch.LongTensor(ans)
-        score[_][ans] = -10000000  #
+        score[_][ans] = -10000000
     return score
 
 
 def r2e(triplets, num_rels):
+    """Gom các thực thể kề với mỗi quan hệ (tính cả quan hệ nghịch)."""
     src, rel, dst = triplets.transpose()
-    # get all relations
     uniq_r = np.unique(rel)
     uniq_r = np.concatenate((uniq_r, uniq_r+num_rels))
-    # generate r2e
     r_to_e = defaultdict(set)
     for j, (src, rel, dst) in enumerate(triplets):
         r_to_e[rel].add(src)
@@ -96,27 +96,20 @@ def r2e(triplets, num_rels):
 
 
 def build_graph(num_nodes, num_rels, triples, use_cuda, gpu):
-    """
-    :param node_id: node id in the large graph
-    :param num_rels: number of relation
-    :param src: relabeled src id
-    :param rel: original rel id
-    :param dst: relabeled dst id
-    :param use_cuda:
-    :return:
+    """Dựng đồ thị DGL từ các triple 4 cột (src, rel, dst, freq).
+
+    Cột freq là tần suất xuất hiện của triple trong lịch sử, được gắn vào
+    cạnh làm trọng số ('fre'). Chuẩn hoá cạnh theo bậc vào của node đích.
     """
     def comp_deg_norm(g):
         in_deg = g.in_degrees(range(g.number_of_nodes())).float()
         in_deg[torch.nonzero(in_deg == 0).view(-1)] = 1
         norm = 1.0 / in_deg
         return norm
-    # print("the num of dict", len(sro_to_fre))
-    # triples = np.array(triples)
+
     src, rel, dst,fre= triples.transpose()
 
     g = dgl.graph((src, dst), num_nodes=num_nodes)
-    # g.add_nodes(num_nodes)
-    # g.add_edges(src, dst)
     norm = comp_deg_norm(g)
     node_id = torch.arange(0, num_nodes, dtype=torch.long).view(-1, 1)
     g.ndata.update({'id': node_id, 'norm': norm.view(-1, 1)})
@@ -130,14 +123,10 @@ def build_graph(num_nodes, num_rels, triples, use_cuda, gpu):
 
 
 def build_sub_graph(num_nodes, num_rels, triples, use_cuda, gpu):
-    """
-    :param node_id: node id in the large graph
-    :param num_rels: number of relation
-    :param src: relabeled src id
-    :param rel: original rel id
-    :param dst: relabeled dst id
-    :param use_cuda:
-    :return:
+    """Dựng đồ thị DGL cho một snapshot, thêm cạnh nghịch cho mọi triple.
+
+    Quan hệ nghịch mang id r + num_rels. Gắn thêm uniq_r / r_len / r_to_e
+    (từ r2e) để tra cứu các thực thể kề với từng quan hệ.
     """
     def comp_deg_norm(g):
         in_deg = g.in_degrees(range(g.number_of_nodes())).float()
@@ -206,7 +195,6 @@ def stat_ranks(rank_list, method):
     hit_list = []
 
     mrr = torch.mean(1.0 / total_rank.float())
-    # print("MRR ({}): {:.6f}".format(method, mrr.item()))
     for hit in hits:
         avg_count = torch.mean((total_rank <= hit).float())
         hit_list.append(avg_count.item())
@@ -245,9 +233,7 @@ def UnionFindSet(m, edges):
 
     for i in range(m):
         roots[i] = i
-    # print ufs.roots
     for edge in edges:
-        print(edge)
         start, end = edge[0], edge[1]
         parentP = find(start)
         parentQ = find(end)
@@ -325,21 +311,13 @@ def load_all_answers_for_time_filter(total_data, num_rels, num_nodes, rel_p=Fals
     for snap in all_snap:
         all_ans_t = load_all_answers_for_filter(snap, num_rels, rel_p)
         all_ans_list.append(all_ans_t)
-
-    # output_label_list = []
-    # for all_ans in all_ans_list:
-    #     output = []
-    #     ans = []
-    #     for e1 in all_ans.keys():
-    #         for r in all_ans[e1].keys():
-    #             output.append([e1, r])
-    #             ans.append(list(all_ans[e1][r]))
-    #     output = torch.from_numpy(np.array(output))
-    #     output_label_list.append((output, ans))
-    # return output_label_list
     return all_ans_list
 
 def split_by_time(data):
+    """Chia danh sách quadruple (s, r, o, t) đã sắp theo thời gian thành các snapshot.
+
+    Mỗi snapshot là mảng các triple (s, r, o) xảy ra tại cùng một thời điểm.
+    """
     snapshot_list = []
     snapshot = []
     snapshots_num = 0
@@ -347,16 +325,15 @@ def split_by_time(data):
     for i in range(len(data)):
         t = data[i][3]
         train = data[i]
-        # latest_t表示读取的上一个三元组发生的时刻，要求数据集中的三元组是按照时间发生顺序排序的
-        if latest_t != t:  # 同一时刻发生的三元组
-            # show snapshot
+        # Gặp thời điểm mới thì chốt snapshot hiện tại và mở snapshot mới
+        if latest_t != t:
             latest_t = t
             if len(snapshot):
                 snapshot_list.append(np.array(snapshot).copy())
                 snapshots_num += 1
             snapshot = []
         snapshot.append(train[:3])
-    # 加入最后一个shapshot
+    # Chốt snapshot cuối cùng
     if len(snapshot) > 0:
         snapshot_list.append(np.array(snapshot).copy())
         snapshots_num += 1
@@ -376,12 +353,7 @@ def split_by_time(data):
 
 
 def slide_list(snapshots, k=1):
-    """
-    :param k: padding K history for sequence stat
-    :param snapshots: all snapshot
-    :return:
-    """
-    k = k  # k=1 需要取长度k的历史，在加1长度的label
+    """Trượt cửa sổ độ dài k trên danh sách snapshot, mỗi lần dịch 1 bước."""
     if k > len(snapshots):
         print("ERROR: history length exceed the length of snapshot: {}>{}".format(k, len(snapshots)))
     for _ in tqdm(range(len(snapshots)-k+1)):
@@ -401,6 +373,7 @@ def load_data(dataset, bfs_level=3, relabel=False):
         raise ValueError('Unknown dataset: {}'.format(dataset))
 
 def construct_snap(test_triples, num_nodes, num_rels, final_score, topK):
+    """Dựng snapshot dự đoán từ top-K thực thể có điểm cao nhất của mỗi truy vấn."""
     sorted_score, indices = torch.sort(final_score, dim=1, descending=True)
     top_indices = indices[:, :topK]
     predict_triples = []
@@ -412,31 +385,22 @@ def construct_snap(test_triples, num_nodes, num_rels, final_score, topK):
             else:
                 predict_triples.append([index, r-num_rels, test_triples[_][0]])
 
-    # 转化为numpy array
     predict_triples = np.array(predict_triples, dtype=int)
     return predict_triples
 
 def construct_snap_r(test_triples, num_nodes, num_rels, final_score, topK):
+    """Dựng snapshot dự đoán từ top-K quan hệ có điểm cao nhất của mỗi truy vấn."""
     sorted_score, indices = torch.sort(final_score, dim=1, descending=True)
     top_indices = indices[:, :topK]
     predict_triples = []
-    # for _ in range(len(test_triples)):
-    #     h, r = test_triples[_][0], test_triples[_][1]
-    #     if (sorted_score[_][0]-sorted_score[_][1])/sorted_score[_][0] > 0.3:
-    #         if r < num_rels:
-    #             predict_triples.append([h, r, indices[_][0]])
-
     for _ in range(len(test_triples)):
         for index in top_indices[_]:
             h, t = test_triples[_][0], test_triples[_][2]
             if index < num_rels:
                 predict_triples.append([h, index, t])
-                #predict_triples.append([t, index+num_rels, h])
             else:
                 predict_triples.append([t, index-num_rels, h])
-                #predict_triples.append([t, index-num_rels, h])
 
-    # 转化为numpy array
     predict_triples = np.array(predict_triples, dtype=int)
     return predict_triples
 

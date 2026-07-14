@@ -220,10 +220,6 @@ def load_link(dataset):
 
 def load_from_local(dir, dataset):
     data = RGCNLinkDataset(dataset, dir)
-    # if "-d" in dataset:
-    #     data.load(load_time=True)
-    # else:
-    #
     data.load()
     return data
 
@@ -547,8 +543,6 @@ def _read_triplets_as_list(filename, entity_dict, relation_dict, load_time):
         o = int(triplet[2])
         if load_time:
             st = int(triplet[3])
-            # et = int(triplet[4])
-            # l.append([s, r, o, st, et])
             l.append([s, r, o, st])
         else:
             l.append([s, r, o])

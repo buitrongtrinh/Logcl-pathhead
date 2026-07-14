@@ -1,27 +1,25 @@
-import csv
-from datetime import datetime
 import argparse
-import itertools
+import csv
 import os
+import random
 import sys
 import time
-import pickle
+import warnings
+from collections import defaultdict
+from datetime import datetime
+
 import dgl
 import numpy as np
+import pandas as pd
 import torch
 from tqdm import tqdm
-import random
+
 sys.path.append(".")
 from rgcn import utils
 from rgcn.utils import build_sub_graph, build_graph
-from src.rrgcn import RecurrentRGCN
-from src.hyperparameter_range import hp_range
-import torch.nn.modules.rnn
-from collections import defaultdict
 from rgcn.knowledge_graph import _read_triplets_as_list
-import time
-import pandas as pd
-import warnings
+from src.rrgcn import RecurrentRGCN
+
 warnings.filterwarnings('ignore')
 
 
@@ -60,8 +58,12 @@ def ensure_csv_schema(filename, fieldnames):
         writer.writerows(rows)
 
 
-def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
-    # 根据输入的每一个时间的图来更新查询查询
+def update_dict(subg_arr, s_to_sro, sr_to_sro, sro_to_fre, num_rels):
+    """Cập nhật dict tra cứu lịch sử từ một snapshot: s -> {(s,r,o)} và (s,r) -> {o}.
+
+    Tính cả chiều nghịch (quan hệ nghịch mang id r + num_rels). Dùng ở bước
+    tiền xử lý để sinh các file trong data/<dataset>/his_dict.
+    """
     inverse_subg = subg_arr[:, [2, 1, 0]]
     inverse_subg[:, 1] = inverse_subg[:, 1] + num_rels
     subg_triples = np.concatenate([subg_arr, inverse_subg])
@@ -70,16 +72,16 @@ def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
         sr_to_sro[(src, rel)].add(dst)
         
 def e2r(triplets, num_rels):
-    # 统计同一个查询实体连接不同的关系
+    """Gom các quan hệ đi ra từ mỗi thực thể truy vấn.
+
+    Trả về [uniq_e, r_len, r_idx]: danh sách thực thể nguồn duy nhất, khoảng
+    (begin, end) của mỗi thực thể trong r_idx, và danh sách id quan hệ phẳng.
+    """
     src, rel, dst = triplets.transpose()
-    # get all relations
-    # uniq_e = np.concatenate((src, dst))
     uniq_e = np.unique(src)
-    # generate r2e
     e_to_r = defaultdict(set)
     for j, (src, rel, dst) in enumerate(triplets):
         e_to_r[src].add(rel)
-        # e_to_r[dst].add(rel+num_rels)
     r_len = []
     r_idx = []
     idx = 0
@@ -92,52 +94,45 @@ def e2r(triplets, num_rels):
     r_idx = torch.from_numpy(np.array(r_idx)).long().cuda()
     return [uniq_e, r_len, r_idx]
 
-def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_rels, use_cuda, gpu):
-    # q_to_sro = defaultdict(list)
-    q_to_sro = set()
+def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples, num_nodes, num_rels, use_cuda, gpu):
+    """Lấy mẫu đồ thị con lịch sử quanh các truy vấn (lân cận 2 bước).
+
+    Với mỗi truy vấn (s, r), tra sr_to_sro để lấy các thực thể đích từng xuất
+    hiện trong lịch sử, rồi giữ lại mọi triple lịch sử xuất phát từ s hoặc từ
+    các thực thể đích đó. Tần suất của mỗi triple nằm ở cột thứ 4 làm trọng số
+    cạnh. Trả về hai đồ thị con: chiều xuôi và chiều nghịch.
+    """
     inverse_triples = triples[:, [2, 1, 0]]
     inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
-    all_triples = np.concatenate([triples, inverse_triples])
-    # ent_set = set(all_triples[:, 0])
     src_set = set(triples[:, 0])
     dst_set = set(triples[:, 0])
 
-    # ----------------二阶邻居采样-----------------------
-    # er_list = list(set([(tri[0],tri[1]) for tri in all_triples]))
-    er_list = list(set([(tri[0],tri[1]) for tri in triples]))
-    er_list_inv = list(set([(tri[0],tri[1]) for tri in inverse_triples]))
-    # ent_list = list(ent_set)
-    # rel_list = list(set(all_triples[:, 1]))
+    er_list = list(set([(tri[0], tri[1]) for tri in triples]))
+    er_list_inv = list(set([(tri[0], tri[1]) for tri in inverse_triples]))
 
+    # Gộp các triple lịch sử trùng nhau, đếm tần suất vào cột 'freq'
     inverse_subg = subg_arr[:, [2, 1, 0]]
     inverse_subg[:, 1] = inverse_subg[:, 1] + num_rels
     subg_triples = np.concatenate([subg_arr, inverse_subg])
     df = pd.DataFrame(np.array(subg_triples), columns=['src', 'rel', 'dst'])
-    #整合重复三元组并统计三元组的频率，将三元组的频率作为第四列数据
-    subg_df = df.groupby(df.columns.tolist()).size().reset_index().rename(columns={0:'freq'}) 
-    keys = list(sr_to_sro.keys())
-    values = list(sr_to_sro.values())
-    df_dic =  pd.DataFrame({'sr': keys, 'dst': values}) #将查询字段转化为pandas
+    subg_df = df.groupby(df.columns.tolist()).size().reset_index().rename(columns={0: 'freq'})
+    df_dic = pd.DataFrame({'sr': list(sr_to_sro.keys()), 'dst': list(sr_to_sro.values())})
 
-    dst_df = df_dic.query('sr in @er_list')  #获取查询实体和关系的pandas
-    dst_get = dst_df['dst'].values    #获取目标尾实体
-    two_ent = set().union(*dst_get)   #将头实体与尾实体进行整合
-    all_ent = list(src_set|two_ent)   
+    # Chiều xuôi: giữ triple xuất phát từ thực thể nguồn hoặc thực thể đích lịch sử của (s, r)
+    dst_df = df_dic.query('sr in @er_list')
+    two_ent = set().union(*dst_df['dst'].values)
+    all_ent = list(src_set | two_ent)
     result = subg_df.query('src in @all_ent')
 
-    dst_df_inv = df_dic.query('sr in @er_list_inv')  #获取查询实体和关系的pandas
-    dst_get_inv = dst_df_inv['dst'].values    #获取目标尾实体
-    two_ent_inv = set().union(*dst_get_inv)   #将头实体与尾实体进行整合
-    all_ent_inv = list(dst_set|two_ent_inv)  
+    # Chiều nghịch: tương tự với các quan hệ nghịch
+    dst_df_inv = df_dic.query('sr in @er_list_inv')
+    two_ent_inv = set().union(*dst_df_inv['dst'].values)
+    all_ent_inv = list(dst_set | two_ent_inv)
     result_inv = subg_df.query('src in @all_ent_inv')
-    #----------------二阶邻居采样-----------------------
-    # result = subg_df.query('src in @src_set')
-    q_tri = result.to_numpy()
-    q_tri_inv = result_inv.to_numpy()
 
-    his_sub = build_graph(num_nodes, num_rels, q_tri, use_cuda, gpu) 
-    his_sub_inv = build_graph(num_nodes, num_rels, q_tri_inv, use_cuda, gpu)
-    return  his_sub,his_sub_inv
+    his_sub = build_graph(num_nodes, num_rels, result.to_numpy(), use_cuda, gpu)
+    his_sub_inv = build_graph(num_nodes, num_rels, result_inv.to_numpy(), use_cuda, gpu)
+    return his_sub, his_sub_inv
 
 
 
@@ -167,24 +162,23 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
 
     idx = 0
     if mode == "test":
-        # test mode: load parameter form file
-        print("------------store_path----------------",model_name)
+        # Chế độ test: nạp trọng số tốt nhất từ checkpoint
         if use_cuda:
             checkpoint = torch.load(model_name, map_location=torch.device('cuda:{}'.format(args.gpu)))
         else:
             checkpoint = torch.load(model_name, map_location=torch.device('cpu'))
-        print("Load Model name: {}. Using best epoch : {}".format(model_name, checkpoint['epoch']))  # use best stat checkpoint
+        print("Load Model name: {}. Using best epoch : {}".format(model_name, checkpoint['epoch']))
         print("\n"+"-"*10+"start testing"+"-"*10+"\n")
         _res = model.load_state_dict(checkpoint['state_dict'], strict=False)
         if _res.missing_keys:
-            print("[load][CANH BAO] thieu %d key (co the nap nham checkpoint): %s"
+            print("[load] warning: %d missing keys (checkpoint may not match this config): %s"
                   % (len(_res.missing_keys), _res.missing_keys[:5]))
         if _res.unexpected_keys:
-            print("[load] bo qua %d key du: %s"
+            print("[load] skipped %d unexpected keys: %s"
                   % (len(_res.unexpected_keys), _res.unexpected_keys[:5]))
 
     model.eval()
-    # do not have inverse relation in test input
+    # Chuỗi lịch sử đầu vào chỉ chứa triple xuôi; chiều nghịch được sinh trong vòng lặp
     input_list = [snap for snap in history_list[-args.test_history_len:]]
 
     his_list = history_list[:]
@@ -208,7 +202,6 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
 
         mrr_filter_snap, mrr_snap, rank_raw, rank_filter = utils.get_total_rank(test_triples, final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
         mrr_filter_snap_inv, mrr_snap_inv, rank_raw_inv, rank_filter_inv = utils.get_total_rank(inv_test_triples, inv_final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
-            # used to global statistic
         ranks_raw.append(rank_raw)
         ranks_filter.append(rank_filter)
         ranks_raw_inv.append(rank_raw_inv)
@@ -216,34 +209,32 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
         if dump_rows is not None:
             tt = test_triples.detach().cpu().numpy()
             it = inv_test_triples.detach().cpu().numpy()
-            rr = rank_raw.detach().cpu().numpy(); rf = rank_filter.detach().cpu().numpy()
-            rri = rank_raw_inv.detach().cpu().numpy(); rfi = rank_filter_inv.detach().cpu().numpy()
+            rr = rank_raw.detach().cpu().numpy()
+            rf = rank_filter.detach().cpu().numpy()
+            rri = rank_raw_inv.detach().cpu().numpy()
+            rfi = rank_filter_inv.detach().cpu().numpy()
             for k in range(tt.shape[0]):
                 dump_rows.append((time_idx, 'fwd', int(tt[k, 0]), int(tt[k, 1]), int(tt[k, 2]), int(rr[k]), int(rf[k])))
             for k in range(it.shape[0]):
                 dump_rows.append((time_idx, 'inv', int(it[k, 0]), int(it[k, 1]), int(it[k, 2]), int(rri[k]), int(rfi[k])))
-            # used to show slide results
+
+        # Trượt cửa sổ lịch sử: multi-step dùng snapshot dự đoán, ngược lại dùng ground truth
         if args.multi_step:
-            if not args.relation_evaluation:    
+            if not args.relation_evaluation:
                 predicted_snap = utils.construct_snap(test_triples, num_nodes, num_rels, final_score, args.topk)
-            # else:
-            #     predicted_snap = utils.construct_snap_r(test_triples, num_nodes, num_rels, final_r_score, args.topk)
             if len(predicted_snap):
                 input_list.pop(0)
                 input_list.append(predicted_snap)
         else:
             input_list.pop(0)
             input_list.append(test_snap)
-            # subg_arr = np.concatenate([subg_arr,test_snap])
-            # print(np.shape(subg_arr))
         idx += 1
 
     if dump_rows is not None:
-        import csv as _csv
-        with open(dump_ranks_path, 'w', newline='') as _f:
-            _w = _csv.writer(_f)
-            _w.writerow(['time', 'dir', 's', 'r', 'o', 'rank_raw', 'rank_filter'])
-            _w.writerows(dump_rows)
+        with open(dump_ranks_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['time', 'dir', 's', 'r', 'o', 'rank_raw', 'rank_filter'])
+            writer.writerows(dump_rows)
         print("[dump-ranks] wrote %d rows -> %s" % (len(dump_rows), dump_ranks_path))
 
     mrr_raw,hit_raw = utils.stat_ranks(ranks_raw, "raw")
@@ -259,8 +250,8 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     print("(all_raw) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_raw.item(), all_hit_raw[0],all_hit_raw[1],all_hit_raw[2]))
     print("(all_filter) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_filter.item(), all_hit_filter[0],all_hit_filter[1],all_hit_filter[2]))
     
-    # 文件转储
-    if mode == "test": # test模式写入，train模式忽略
+    # Ghi kết quả cuối cùng cùng cấu hình chạy vào result/<dataset>.csv (chỉ ở chế độ test)
+    if mode == "test":
         os.makedirs('./result', exist_ok=True)
         filename = './result/'+ args.dataset + ".csv"
         fieldnames=['encoder','opn','pre_type','use_static','use_cl','use_path','path_level',
@@ -291,7 +282,7 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
 
 
 def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=None):
-    # load configuration for grid search the best configuration
+    # Cho phép ghi đè siêu tham số khi chạy grid search
     if n_hidden:
         args.n_hidden = n_hidden
     if n_layers:
@@ -301,7 +292,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     if n_bases:
         args.n_bases = n_bases
 
-    # load graph data
+    # Nạp dữ liệu và chia theo snapshot thời gian
     print("loading graph data")
     data = utils.load_data(args.dataset)
     train_list = utils.split_by_time(data.train)
@@ -343,7 +334,6 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
         num_static_rels, num_words, static_triples, static_graph = 0, 0, [], None
 
 
-    # create stat
     model = RecurrentRGCN(args.decoder,
                           args.encoder,
                         num_nodes,
@@ -390,7 +380,6 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     if args.add_static_graph:
         static_graph = build_sub_graph(len(static_node_id), num_static_rels, static_triples, use_cuda, args.gpu)
 
-    # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     if args.test:
@@ -409,7 +398,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
         print("----------------------------------------start training----------------------------------------\n")
         best_mrr = 0
         his_best = 0
-        # Log per-epoch ra CSV de giu sau khi train xong (ve loss/MRR theo epoch)
+        # Ghi log theo epoch ra CSV để vẽ đường cong huấn luyện (analysis/plot_training_curves.py)
         os.makedirs('./logs', exist_ok=True)
         epoch_log_path = './logs/' + model_name + '.csv'
         with open(epoch_log_path, 'w', newline='') as _lf:
@@ -417,7 +406,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                                        'path_gamma',
                                        'val_mrr_filter','val_H@1','val_H@3','val_H@10',
                                        'best_mrr','patience_left'])
-        print("[epoch-log] ghi log per-epoch -> {}".format(epoch_log_path))
+        print("[epoch-log] per-epoch metrics -> {}".format(epoch_log_path))
         for epoch in range(args.n_epochs):
             model.train()
             losses = []
@@ -436,41 +425,42 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     input_list = train_list[train_sample_num - args.train_history_len:
                                         train_sample_num]
 
+                # Đồ thị con lịch sử đã lấy mẫu sẵn ở bước tiền xử lý cho snapshot này
                 subgraph_arr = np.load('./data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
                 subgraph_arr_inv = np.load('./data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
-                subg_snap = build_graph(num_nodes, num_rels, subgraph_arr, use_cuda, args.gpu)   #取出采样子图
+                subg_snap = build_graph(num_nodes, num_rels, subgraph_arr, use_cuda, args.gpu)
                 subg_snap_inv = build_graph(num_nodes, num_rels, subgraph_arr_inv, use_cuda, args.gpu)
 
                 inverse_triples = output[0][:, [2, 1, 0]]
                 inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
                 que_pair =  e2r(output[0], num_rels)
                 que_pair_inv =  e2r(inverse_triples, num_rels)
-                # generate history graph
+                # Chuỗi đồ thị lịch sử liền trước snapshot đích
                 history_glist = [build_sub_graph(num_nodes, num_rels, snap, use_cuda, args.gpu) for snap in input_list]
                 triples = torch.from_numpy(output[0]).long().cuda()
-                inverse_triples = torch.from_numpy(inverse_triples).long().cuda() 
-                for id in range(2): 
-                    if id %2 ==0: 
+                inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
+                # Học lần lượt hai chiều truy vấn: xuôi (dự đoán object) rồi nghịch (dự đoán subject)
+                for id in range(2):
+                    if id %2 ==0:
                         loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, use_cuda)
                     else:
                         loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, use_cuda)
 
                     loss = loss_e+ loss_static +loss_cl
-                
+
                     losses.append(loss.item())
                     losses_e.append(loss_e.item())
                     losses_r.append(loss_r.item())
                     losses_static.append(loss_static.item())
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm)  # clip gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm)
                     optimizer.step()
                     optimizer.zero_grad()
-                # break
             path_gamma = model.path_gamma.item() if model.use_path else 0.0
             print("Epoch {:04d} | Ave Loss: {:.4f} | entity-relation-static:{:.4f}-{:.4f}-{:.4f} Path gamma {:.6f} Best MRR {:.4f} | Model {} "
                   .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_static), path_gamma, best_mrr, model_name))
 
-            # validation
+            # Đánh giá trên tập valid theo chu kỳ evaluate_every
             val_mrr_this_epoch = None
             val_h1_this_epoch = None
             val_h3_this_epoch = None
@@ -492,7 +482,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 val_h3_this_epoch  = float(hits_filter[1])
                 val_h10_this_epoch = float(hits_filter[2])
 
-                if not args.relation_evaluation:  # entity prediction evalution
+                # Lưu checkpoint khi MRR filter cải thiện; dừng sớm sau 5 lần đánh giá không cải thiện
+                if not args.relation_evaluation:
                     if mrr_filter < best_mrr:
                         his_best += 1
                         _early_stop = (his_best >= 5) or (epoch >= args.n_epochs)
@@ -507,7 +498,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             else:
                 _early_stop = False
 
-            # Ghi 1 dong log CSV cho epoch nay (luon ghi, du co validate hay khong)
+            # Ghi một dòng log cho epoch này, kể cả khi epoch không chạy validation
             with open(epoch_log_path, 'a', newline='') as _lf:
                 csv.writer(_lf).writerow([
                     epoch,
@@ -527,7 +518,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
 
             torch.cuda.empty_cache()
             if _early_stop:
-                print("[early-stop] dung sau epoch {} (patience het)".format(epoch))
+                print("[early-stop] stopped after epoch {} (no val improvement in 5 evals)".format(epoch))
                 break
         mrr_raw, mrr_filter, _hits = test(model,
                             train_list+valid_list,
@@ -617,7 +608,7 @@ if __name__ == '__main__':
     parser.add_argument("--n-layers", type=int, default=2,
                         help="number of propagation rounds")
     parser.add_argument("--self-loop", action='store_true', default=True,
-                        help="perform layer normalization in every layer of gcn ")
+                        help="add self-loop message in every RGCN layer")
     parser.add_argument("--layer-norm", action='store_true', default=False,
                         help="perform layer normalization in every layer of gcn ")
     parser.add_argument("--relation-prediction", action='store_true', default=False,
@@ -635,7 +626,7 @@ if __name__ == '__main__':
     parser.add_argument("--grad-norm", type=float, default=1.0,
                         help="norm to clip gradient to")
     parser.add_argument("--dump-ranks", type=str, default=None,
-                        help="neu dat, xuat rank tung truy van (test) ra CSV de phan tich chuyen dich dung/sai")
+                        help="dump per-query test ranks to CSV for error analysis (see analysis/)")
     parser.add_argument("--seed", type=int, default=123,
                         help="random seed for Python, NumPy, Torch, CUDA, and DGL")
 
